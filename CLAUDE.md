@@ -23,6 +23,24 @@ At session close (assistant-inferred or user-marked), finalize `session-memory.m
 
 If the assistant's in-conversation slug context is lost (e.g. after `/clear`), read the most-recent unsealed `projects/<X>/sessions/<slug>/` directory as a heuristic; if multiple unsealed sessions exist, ask the user before writing.
 
+## Record codex sub-agent rounds
+
+This protocol applies only to `claudex-build` SPEC, PLAN, and IMPLEMENT codex execs. `claudex-think` 2nd-opinion calls are out of scope here: their AGREE/DISAGREE/ANGLE-MISSED verdict is projected inline into the parent Claude main round as `[Codex 2nd opinion]: <verdict>`, with raw output preserved at `RUN_DIR/.last-2nd-opinion.raw`. Do not write a separate codex round file for think.
+
+Codex sub-agent round files are named `projects/<X>/sessions/<slug>/rounds/round-<N>-codex-<stage>-r<n>.md`, where `<N>` is the parent Claude main round, `<stage>` is `spec`, `plan`, or `impl`, and `<n>` is `1`, `2`, `fix1`, or `fix2`.
+
+Each file is rendered in this order: frontmatter with `type: round-memory`, `session-id`, `project`, `round`, and `created`; an H1 title using a one-line summary, falling back to `Codex CXMem emissions` when empty; `## Codex prompt (rendered)` with the verbatim bytes handed to `codex exec`, fenced as `text`; `## Codex output (verbatim)` with the verbatim bytes of clean codex stdout, fenced as `text`; `## Reviewer 2nd-opinion` with the first-line verdict `ready-to-execute`, `fix-and-proceed`, `re-review-needed`, `escalate`, `skipped: <stub>`, or `unavailable: <reason>`, followed by the full review body for `--reviewer-review`; then `## Index`, `## Records`, `## Summary`, and deferred `## Round close`.
+
+Writes use whole-file tmpfile-and-rename. If the rendered bytes match the existing target, skip the rename and report `ok: unchanged`.
+
+`## Round close` is appended at parent main-round close by `append-codex-round-close.sh`. This is idempotent: a file already containing a top-level `## Round close` heading is left unchanged; the same heading inside a fenced code block does not count.
+
+`promote-codex-round.sh` extracts `## Round close` for `session-memory.md` promotion, with `## Summary` as the legacy fallback. Emit one warning per fallback file.
+
+Codex sub-agent rounds do not update `Active session:` in `project-memory.md`. Only Claude main rounds do.
+
+When the reviewer is skipped (`fix-and-proceed` no-re-review under stage protocol), the `## Reviewer 2nd-opinion` first line is `skipped: <one-line summary of what r1 asked to fix>`. When reviewer dispatch fails, the first line is `unavailable: <reason>`. Write the round file either way. The synthesized close paragraph uses `fix accepted under stage protocol` for skipped reviewer or `reviewer unavailable: <reason>` for unavailable reviewer, joined with other close-body pieces by one U+0020 space.
+
 ## Design changes route through /claudex:think
 
 When a change involves multi-file work, ambiguous requirements, or architecture-level rethinking, invoke `/claudex:think` rather than designing in chat. Approved specs land in `projects/<X>/specs/r<N>/` and are indexed by `projects/<X>/specs/README.md`; per-run audit dialogues live at `projects/<X>/sessions/<slug>/runs/<run-id>/` (session-active) or `projects/<X>/runs/<run-id>/` (sessionless within the project).
