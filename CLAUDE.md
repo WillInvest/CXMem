@@ -1,31 +1,28 @@
 # CLAUDE.md
 
-1. Read first, in order: `${HOME}/CXMem/STATE.md`, `${HOME}/CXMem/ROADMAP.md`, `${HOME}/CXMem/decisions.md`.
-2. Do not redesign settled decisions; propose a revision such as `Dn-revisits-Dk`.
-3. All design changes go through `/claudex:think` (specs land in `${HOME}/vault/projects/claudex/specs/` per skill convention).
-4. All work happens on the `main` branch of `${HOME}/CXMem/` (its own git repo, separate from vault).
-5. Commit prefix: `cxmem: <what>`. This repo is independent of vault, so vault commit conventions and the weekly digest do not apply.
-6. Do not conflate this project with `${HOME}/vault/projects/claude-memory/`; R1 reconciles them.
-7. Do not touch native auto-memory at `~/.claude/projects/-home-fao-vault/memory/`; R7 covers that.
-8. No premature implementation; build phases produce files only until a sub-spec is approved.
-9. When uncertain, write the open question into `${HOME}/CXMem/notes/open-questions.md`.
+## Orient
 
-## Why each rule exists
+Resolve the active project first:
+- If `CXMEM_PROJECT` env is set and valid (regex `^[A-Za-z0-9._-]+$`, the dir `${HOME}/CXMem/projects/<X>/` exists, and the dir is not a symlink escape), use that as `<X>`.
+- Else walk up from `$PWD` until an ancestor matches `${HOME}/CXMem/projects/<X>/`; use `<X>`.
+- Else escalate: tell the user "I'm running outside any `${HOME}/CXMem/projects/<X>/` and `CXMEM_PROJECT` is unset; cd into a project root or set `CXMEM_PROJECT=<name>`, then re-run." Halt before reading or writing anything.
 
-Rule 1: Without this, future agents cold-read the wrong files first and miss the live state, roadmap order, or settled decisions.
+Once `<X>` is resolved, read `${HOME}/CXMem/projects/<X>/project-memory.md`. It is the cross-session catch-up surface — current state, roadmap, decisions index, sessions log, open questions. If its State block names an active session (`Active session: <slug>, ...`), then list `projects/<X>/sessions/<slug>/rounds/` to find the highest-numbered `round-<n>.md` and read both `projects/<X>/sessions/<slug>/session-memory.md` and that latest round file before responding. The directory listing is the authoritative source for the latest round; the pointer's `last round` field is informational.
 
-Rule 2: Without this, agents silently reopen approved choices and erase decision history instead of recording an explicit revision.
+If `projects/<X>/project-memory.md` doesn't exist (first run in a brand-new project), the next /claudex:think or /claudex:build invocation auto-bootstraps a stub from `${HOME}/CXMem/docs/project-memory-template.md`; no manual creation required.
 
-Rule 3: Without this, design changes happen as freeform chat and never land in the canonical spec/audit trail.
+## Record this session
 
-Rule 4: Without this, work strays onto branches the build pipeline will not pick up, or worse, mixes with vault commits.
+For every round (one `UserPromptSubmit` to the next), the round file `${HOME}/CXMem/projects/<X>/sessions/<slug>/rounds/round-<n>.md` MUST exist on disk before the assistant delivers any user-visible response. Concretely: after each tool batch (if any), append the corresponding records (idempotent on retry); and **before delivering any user-visible response, ensure the round file contains at least the user prompt and the verbatim assistant output to be delivered**, AND update `projects/<X>/project-memory.md`'s `Active session:` pointer line in the same atomic step. Rounds with no tool batch (clarifying-only, decision-only) still get a sparse record (user prompt + assistant output, no tool records). If the final consolidation write fails, surface the failure to the user and DO NOT silently deliver the response — recovery requires either a retry or an explicit note in the next round.
 
-Rule 5: Without the prefix, `cxmem` commits get pulled into the vault weekly digest the user does not want them in.
+Slug = `YYYY-MM-DD-HHMM-<topic>`; round counter is monotonic from 1 within the session. On the first record of a new session, claim the slug atomically with `mkdir projects/<X>/sessions/<slug>/`; on collision retry with `-2`, `-3`. Immediately after claim, write `projects/<X>/sessions/<slug>/.session-meta` with `{slug, started_at, project: <X>, uuid?}`. Every append uses tmpfile-and-rename, is keyed by a structural heading (idempotent on retry), and uses record IDs `<round>.<seq>[<letter>]` that apply batch-collapse: same-tool same-purpose batch = 1 record; different-tool batch = 1 record per tool.
 
-Rule 6: Without this, future agents silently re-do or reverse the prior `claude-memory/` work instead of waiting for R1's reconciliation.
+At the next `UserPromptSubmit` (round close), append a `## Round close` block to the same round file with the round-end summary, and promote that summary upward into `projects/<X>/sessions/<slug>/session-memory.md`. The `## Round close` block is idempotent: if already present, no-op.
 
-Rule 7: Without this, native auto-memory gets changed before R7 defines whether and how CXMem should integrate with it.
+At session close (assistant-inferred or user-marked), finalize `session-memory.md`, append a row to `projects/<X>/project-memory.md`'s Sessions log. Sessions are sealed, never deleted.
 
-Rule 8: Without this, scaffolding sessions grow implementation code before the relevant sub-spec approves behavior and tests.
+If the assistant's in-conversation slug context is lost (e.g. after `/clear`), read the most-recent unsealed `projects/<X>/sessions/<slug>/` directory as a heuristic; if multiple unsealed sessions exist, ask the user before writing.
 
-Rule 9: Without this, uncertainty is lost in chat context and later agents repeat the same unresolved questions.
+## Design changes route through /claudex:think
+
+When a change involves multi-file work, ambiguous requirements, or architecture-level rethinking, invoke `/claudex:think` rather than designing in chat. Approved specs land in `projects/<X>/specs/r<N>/` and are indexed by `projects/<X>/specs/README.md`; per-run audit dialogues live at `projects/<X>/sessions/<slug>/runs/<run-id>/` (session-active) or `projects/<X>/runs/<run-id>/` (sessionless within the project).

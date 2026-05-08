@@ -1,0 +1,3355 @@
+OpenAI Codex v0.128.0 (research preview)
+--------
+workdir: /home/fao/CXMem
+model: gpt-5.5
+provider: openai
+approval: never
+sandbox: danger-full-access
+reasoning effort: none
+reasoning summaries: none
+session id: 019dff63-1f56-71e0-9169-1420e0c5cf9f
+--------
+user
+You are a research agent. Produce a deep, current research report on how to programmatically generate images via OpenAI's latest image-generation model, with a strong emphasis on invoking it from inside the Codex CLI (`codex exec`) on Linux.
+
+CRITICAL CONTEXT
+- The requester (Hao) calls the model "gpt image 2.0". That name may or may not be the actual current model ID as of 2026-05. Your first job is to verify the *real* current model name(s) and capabilities by consulting OpenAI's official documentation (platform.openai.com/docs) and recent release notes / changelog. Do not assume training-data knowledge is current.
+- Target environment: Linux, bash, codex-cli 0.128.0 already installed at /usr/bin/codex. `OPENAI_API_KEY` is assumed available in the shell environment (verify how Codex CLI sources auth — does it reuse OPENAI_API_KEY, or does it use its own auth via `codex login`? Document both paths.)
+- End goal: Hao will build a Claude Code skill named `/img <prompt>` whose orchestrator dispatches Codex agents (single or in teams) to generate images. So the report must be concrete enough that a downstream skill author can copy-paste working invocations.
+
+DELIVERABLE
+Write the full report to: /home/fao/CXMem/notes/research/codex-image-gen.md
+
+Use this exact section structure:
+
+1. **Model landscape (verified 2026-05)** — current OpenAI image-gen model IDs, release dates, what supersedes what. Explicitly call out whether anything called "gpt-image-2" or "gpt-image-2.0" exists; if the latest is still gpt-image-1 (or has a different new name), say so plainly.
+2. **Capabilities matrix** — for each current model: supported sizes, quality tiers, response formats (url vs b64_json), max prompt length, content-policy notes, multi-image-per-request limits, edit/inpaint support, variation support, transparency/alpha support, latency ranges, pricing per image at each size/quality tier.
+3. **API invocation — raw HTTP** — minimal `curl` command to generate one image and save it locally. Include the request JSON shape and how to decode/save the response (handling both b64_json and url formats). Include error-mode examples (rate limit, content-policy refusal).
+4. **API invocation — OpenAI Python/Node SDKs** — current SDK call shape for both languages, just enough to stand up a one-shot script.
+5. **Codex CLI integration paths** — answer concretely:
+   - Does Codex CLI 0.128.0 expose image generation as a built-in tool/MCP? If yes, exact invocation. If no, say so.
+   - Recommended pattern for a Codex agent to generate an image: shell out to curl? call a python helper script? built-in tool? Compare options.
+   - How `codex exec` should be invoked from a parent orchestrator to do this (sandbox mode, file output path, --output-last-message usage).
+   - Auth: does `codex exec` inherit OPENAI_API_KEY from env, or does it require `codex login` separately? Verify.
+6. **Reference helper script** — write a self-contained `bin/img-gen.sh` (or .py) that takes `--prompt`, `--out`, optional `--size`, `--quality`, `--n`, and produces image file(s). Code goes inline in the report (do not actually create the file in the repo — just provide it for copy-paste).
+7. **Skill-design implications for `/img`** — given the above, sketch how the `/img <prompt>` orchestrator should dispatch Codex agents:
+   - Single-agent path: one image, one codex exec call.
+   - Multi-agent path: fan out N codex exec calls in parallel for variations / different styles.
+   - Where output files should land (suggest a convention).
+   - What metadata (prompt, model, params, cost) to record alongside each image.
+   - Failure handling (retries on rate-limit, content-policy refusals).
+8. **Open questions / risks** — anything the docs don't answer, anything that smelled stale or contradictory, anything the skill author will need to test empirically.
+9. **Source list** — every URL you consulted, with a one-line note on what it confirmed.
+
+CONSTRAINTS
+- Do NOT make calls to the OpenAI API yourself. Your job is research + reference code, not test invocations.
+- Do NOT write any file other than the report at /home/fao/CXMem/notes/research/codex-image-gen.md.
+- Use web search aggressively. Cite primary sources (OpenAI docs, OpenAI cookbook, official Codex CLI docs/repo). Avoid third-party blogs unless they fill a gap.
+- Be honest about uncertainty. If something is unclear or you cannot verify, say so in the report rather than guessing.
+- Keep prose tight. Tables for capability matrices and pricing. Code blocks for invocations.
+
+Begin by verifying the current model lineup, then work through the sections in order.
+
+codex
+I’ll use the `openai-docs` skill for the API/model portion, then verify local Codex CLI behavior from the installed binary and official repo/docs before writing the single requested report file.
+exec
+/bin/bash -lc "sed -n '1,220p' /home/fao/.codex/skills/.system/openai-docs/SKILL.md && codex --version && codex exec --help" in /home/fao/CXMem
+ succeeded in 0ms:
+---
+name: "openai-docs"
+description: "Use when the user asks how to build with OpenAI products or APIs and needs up-to-date official documentation with citations, help choosing the latest model for a use case, or model upgrade and prompt-upgrade guidance; prioritize OpenAI docs MCP tools, use bundled references only as helper context, and restrict any fallback browsing to official OpenAI domains."
+---
+
+
+# OpenAI Docs
+
+Provide authoritative, current guidance from OpenAI developer docs using the developers.openai.com MCP server. Always prioritize the developer docs MCP tools over web.run for OpenAI-related questions. This skill also owns model selection, API model migration, and prompt-upgrade guidance. Only if the MCP server is installed and returns no meaningful results should you fall back to web search.
+
+## Quick start
+
+- Use `mcp__openaiDeveloperDocs__search_openai_docs` to find the most relevant doc pages.
+- Use `mcp__openaiDeveloperDocs__fetch_openai_doc` to pull exact sections and quote/paraphrase accurately.
+- Use `mcp__openaiDeveloperDocs__list_openai_docs` only when you need to browse or discover pages without a clear query.
+- For model-selection, "latest model", or default-model questions, fetch `https://developers.openai.com/api/docs/guides/latest-model.md` first. If that is unavailable, load `references/latest-model.md`.
+- For model upgrades or prompt upgrades, run `node scripts/resolve-latest-model-info.js` only when the target is latest/current/default or otherwise unspecified; otherwise preserve the explicitly requested target.
+- Preserve explicit target requests: if the user names a target model like "migrate to GPT-5.4", keep that requested target even if `latest-model.md` names a newer model. Mention newer guidance only as optional.
+- If current remote guidance is needed, fetch both the returned migration and prompting guide URLs directly. If direct fetch fails, use MCP/search fallback; if that also fails, use bundled fallback references and disclose the fallback.
+
+## OpenAI product snapshots
+
+1. Apps SDK: Build ChatGPT apps by providing a web component UI and an MCP server that exposes your app's tools to ChatGPT.
+2. Responses API: A unified endpoint designed for stateful, multimodal, tool-using interactions in agentic workflows.
+3. Chat Completions API: Generate a model response from a list of messages comprising a conversation.
+4. Codex: OpenAI's coding agent for software development that can write, understand, review, and debug code.
+5. gpt-oss: Open-weight OpenAI reasoning models (gpt-oss-120b and gpt-oss-20b) released under the Apache 2.0 license.
+6. Realtime API: Build low-latency, multimodal experiences including natural speech-to-speech conversations.
+7. Agents SDK: A toolkit for building agentic apps where a model can use tools and context, hand off to other agents, stream partial results, and keep a full trace.
+
+## If MCP server is missing
+
+If MCP tools fail or no OpenAI docs resources are available:
+
+1. Run the install command yourself: `codex mcp add openaiDeveloperDocs --url https://developers.openai.com/mcp`
+2. If it fails due to permissions/sandboxing, immediately retry the same command with escalated permissions and include a 1-sentence justification for approval. Do not ask the user to run it yet.
+3. Only if the escalated attempt fails, ask the user to run the install command.
+4. Ask the user to restart Codex.
+5. Re-run the doc search/fetch after restart.
+
+## Workflow
+
+1. Clarify whether the request is general docs lookup, model selection, a model-string upgrade, prompt-upgrade guidance, or broader API/provider migration.
+2. For model-selection or upgrade requests, prefer current remote docs over bundled references when the user asks for latest/current/default guidance.
+   - Fetch `https://developers.openai.com/api/docs/guides/latest-model.md`.
+   - Find the latest model ID and explicit migration or prompt-guidance links.
+   - Prefer explicit links from the latest-model page over derived URLs.
+   - For explicit named-model requests, preserve the requested model target and do not silently retarget to the latest model. Mention newer remote guidance only as optional.
+   - For dynamic latest/current/default upgrades, run `node scripts/resolve-latest-model-info.js`, then fetch both returned guide URLs directly when possible.
+   - If direct guide fetch fails, use the developer-docs MCP tools or official OpenAI-domain search to find the same guide content.
+   - If remote docs are unavailable, use bundled fallback references and say that fallback guidance was used.
+3. For model upgrades, keep changes narrow: update active OpenAI API model defaults and directly related prompts only when safe.
+4. Leave historical docs, examples, eval baselines, fixtures, provider comparisons, provider registries, pricing tables, alias defaults, low-cost fallback paths, and ambiguous older model usage unchanged unless the user explicitly asks to upgrade them.
+5. Do not perform SDK, tooling, IDE, plugin, shell, auth, or provider-environment migrations as part of a model-and-prompt upgrade.
+6. If an upgrade needs API-surface changes, schema rewiring, tool-handler changes, or implementation work beyond a literal model-string replacement and prompt edits, report it as blocked or confirmation-needed.
+7. For general docs lookup, search docs with a precise query, fetch the best page and exact section needed, and answer with concise citations.
+
+## Reference map
+
+Read only what you need:
+
+- `https://developers.openai.com/api/docs/guides/latest-model.md` -> current model-selection and "best/latest/current model" questions.
+- `references/latest-model.md` -> bundled fallback for model-selection and "best/latest/current model" questions.
+- `references/upgrade-guide.md` -> bundled fallback for model upgrade and upgrade-planning requests.
+- `references/prompting-guide.md` -> bundled fallback for prompt rewrites and prompt-behavior upgrades.
+
+## Quality rules
+
+- Treat OpenAI docs as the source of truth; avoid speculation.
+- Keep migration changes narrow and behavior-preserving.
+- Prefer prompt-only upgrades when possible.
+- Do not invent pricing, availability, parameters, API changes, or breaking changes.
+- Keep quotes short and within policy limits; prefer paraphrase with citations.
+- If multiple pages differ, call out the difference and cite both.
+- If official docs and repo behavior disagree, state the conflict and stop before making broad edits.
+- If docs do not cover the user’s need, say so and offer next steps.
+
+## Tooling notes
+
+- Always use MCP doc tools before any web search for OpenAI-related questions.
+- If the MCP server is installed but returns no meaningful results, then use web search as a fallback.
+- When falling back to web search, restrict to official OpenAI domains (developers.openai.com, platform.openai.com) and cite sources.
+codex-cli 0.128.0
+Run Codex non-interactively
+
+Usage: codex exec [OPTIONS] [PROMPT]
+       codex exec [OPTIONS] <COMMAND> [ARGS]
+
+Commands:
+  resume  Resume a previous session by id or pick the most recent with --last
+  review  Run a code review against the current repository
+  help    Print this message or the help of the given subcommand(s)
+
+Arguments:
+  [PROMPT]
+          Initial instructions for the agent. If not provided as an argument (or if `-` is used),
+          instructions are read from stdin. If stdin is piped and a prompt is also provided, stdin
+          is appended as a `<stdin>` block
+
+Options:
+  -c, --config <key=value>
+          Override a configuration value that would otherwise be loaded from `~/.codex/config.toml`.
+          Use a dotted path (`foo.bar.baz`) to override nested values. The `value` portion is parsed
+          as TOML. If it fails to parse as TOML, the raw string is used as a literal.
+          
+          Examples: - `-c model="o3"` - `-c 'sandbox_permissions=["disk-full-read-access"]'` - `-c
+          shell_environment_policy.inherit=all`
+
+      --enable <FEATURE>
+          Enable a feature (repeatable). Equivalent to `-c features.<name>=true`
+
+      --disable <FEATURE>
+          Disable a feature (repeatable). Equivalent to `-c features.<name>=false`
+
+  -i, --image <FILE>...
+          Optional image(s) to attach to the initial prompt
+
+  -m, --model <MODEL>
+          Model the agent should use
+
+      --oss
+          Use open-source provider
+
+      --local-provider <OSS_PROVIDER>
+          Specify which local provider to use (lmstudio or ollama). If not specified with --oss,
+          will use config default or show selection
+
+  -p, --profile <CONFIG_PROFILE>
+          Configuration profile from config.toml to specify default options
+
+  -s, --sandbox <SANDBOX_MODE>
+          Select the sandbox policy to use when executing model-generated shell commands
+          
+          [possible values: read-only, workspace-write, danger-full-access]
+
+      --dangerously-bypass-approvals-and-sandbox
+          Skip all confirmation prompts and execute commands without sandboxing. EXTREMELY
+          DANGEROUS. Intended solely for running in environments that are externally sandboxed
+
+  -C, --cd <DIR>
+          Tell the agent to use the specified directory as its working root
+
+      --add-dir <DIR>
+          Additional directories that should be writable alongside the primary workspace
+
+      --skip-git-repo-check
+          Allow running Codex outside a Git repository
+
+      --ephemeral
+          Run without persisting session files to disk
+
+      --ignore-user-config
+          Do not load `$CODEX_HOME/config.toml`; auth still uses `CODEX_HOME`
+
+      --ignore-rules
+          Do not load user or project execpolicy `.rules` files
+
+      --output-schema <FILE>
+          Path to a JSON Schema file describing the model's final response shape
+
+      --color <COLOR>
+          Specifies color settings for use in the output
+          
+          [default: auto]
+          [possible values: always, never, auto]
+
+      --json
+          Print events to stdout as JSONL
+
+  -o, --output-last-message <FILE>
+          Specifies file where the last message from the agent should be written
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+  -V, --version
+          Print version
+
+web search: 
+web search: site:platform.openai.com/docs image generation gpt-image model images API
+web search: 
+web search: site:platform.openai.com/docs/models/gpt-image-1.5 OpenAI
+web search: 
+web search: site:developers.openai.com/changelog gpt-image-1.5 release date
+web search: 
+web search: https://platform.openai.com/docs/api-reference/images/generate
+web search: 
+web search: site:platform.openai.com/docs/models/gpt-image-2
+web search: 
+web search: https://developers.openai.com/api/docs/models/gpt-image-2
+web search: 
+web search: 'gpt-image-2' in https://developers.openai.com/api/docs/changelog
+web search: 
+web search: https://developers.openai.com/api/docs/guides/image-generation
+web search: 
+web search: 'Generate an image' in https://developers.openai.com/api/docs/guides/image-generation
+web search: 
+web search: https://developers.openai.com/api/docs/guides/image-generation
+web search: 
+web search: https://platform.openai.com/docs/api-reference/images?api-mode=chat
+web search: 
+web search: OpenAI Codex CLI GitHub auth OPENAI_API_KEY codex login exec sandbox output-last-message
+codex
+The current OpenAI docs have already changed in an important way: `gpt-image-2` is real, and the older image guide/API reference pages are partly inconsistent about it. I’m cross-checking model pages, changelog, and parameter docs so the report can separate verified facts from stale documentation.
+exec
+/bin/bash -lc 'codex --help' in /home/fao/CXMem
+ succeeded in 0ms:
+Codex CLI
+
+If no subcommand is specified, options will be forwarded to the interactive CLI.
+
+Usage: codex [OPTIONS] [PROMPT]
+       codex [OPTIONS] <COMMAND> [ARGS]
+
+Commands:
+  exec         Run Codex non-interactively [aliases: e]
+  review       Run a code review non-interactively
+  login        Manage login
+  logout       Remove stored authentication credentials
+  mcp          Manage external MCP servers for Codex
+  plugin       Manage Codex plugins
+  mcp-server   Start Codex as an MCP server (stdio)
+  app-server   [experimental] Run the app server or related tooling
+  completion   Generate shell completion scripts
+  update       Update Codex to the latest version
+  sandbox      Run commands within a Codex-provided sandbox
+  debug        Debugging tools
+  apply        Apply the latest diff produced by Codex agent as a `git apply` to your local working
+               tree [aliases: a]
+  resume       Resume a previous interactive session (picker by default; use --last to continue the
+               most recent)
+  fork         Fork a previous interactive session (picker by default; use --last to fork the most
+               recent)
+  cloud        [EXPERIMENTAL] Browse tasks from Codex Cloud and apply changes locally
+  exec-server  [EXPERIMENTAL] Run the standalone exec-server service
+  features     Inspect feature flags
+  help         Print this message or the help of the given subcommand(s)
+
+Arguments:
+  [PROMPT]
+          Optional user prompt to start the session
+
+Options:
+  -c, --config <key=value>
+          Override a configuration value that would otherwise be loaded from `~/.codex/config.toml`.
+          Use a dotted path (`foo.bar.baz`) to override nested values. The `value` portion is parsed
+          as TOML. If it fails to parse as TOML, the raw string is used as a literal.
+          
+          Examples: - `-c model="o3"` - `-c 'sandbox_permissions=["disk-full-read-access"]'` - `-c
+          shell_environment_policy.inherit=all`
+
+      --enable <FEATURE>
+          Enable a feature (repeatable). Equivalent to `-c features.<name>=true`
+
+      --disable <FEATURE>
+          Disable a feature (repeatable). Equivalent to `-c features.<name>=false`
+
+      --remote <ADDR>
+          Connect the TUI to a remote app server websocket endpoint.
+          
+          Accepted forms: `ws://host:port` or `wss://host:port`.
+
+      --remote-auth-token-env <ENV_VAR>
+          Name of the environment variable containing the bearer token to send to a remote app
+          server websocket
+
+  -i, --image <FILE>...
+          Optional image(s) to attach to the initial prompt
+
+  -m, --model <MODEL>
+          Model the agent should use
+
+      --oss
+          Use open-source provider
+
+      --local-provider <OSS_PROVIDER>
+          Specify which local provider to use (lmstudio or ollama). If not specified with --oss,
+          will use config default or show selection
+
+  -p, --profile <CONFIG_PROFILE>
+          Configuration profile from config.toml to specify default options
+
+  -s, --sandbox <SANDBOX_MODE>
+          Select the sandbox policy to use when executing model-generated shell commands
+          
+          [possible values: read-only, workspace-write, danger-full-access]
+
+      --dangerously-bypass-approvals-and-sandbox
+          Skip all confirmation prompts and execute commands without sandboxing. EXTREMELY
+          DANGEROUS. Intended solely for running in environments that are externally sandboxed
+
+  -C, --cd <DIR>
+          Tell the agent to use the specified directory as its working root
+
+      --add-dir <DIR>
+          Additional directories that should be writable alongside the primary workspace
+
+  -a, --ask-for-approval <APPROVAL_POLICY>
+          Configure when the model requires human approval before executing a command
+
+          Possible values:
+          - untrusted:  Only run "trusted" commands (e.g. ls, cat, sed) without asking for user
+            approval. Will escalate to the user if the model proposes a command that is not in the
+            "trusted" set
+          - on-failure: DEPRECATED: Run all commands without asking for user approval. Only asks for
+            approval if a command fails to execute, in which case it will escalate to the user to
+            ask for un-sandboxed execution. Prefer `on-request` for interactive runs or `never` for
+            non-interactive runs
+          - on-request: The model decides when to ask the user for approval
+          - never:      Never ask for user approval Execution failures are immediately returned to
+            the model
+
+      --search
+          Enable live web search. When enabled, the native Responses `web_search` tool is available
+          to the model (no per‑call approval)
+
+      --no-alt-screen
+          Disable alternate screen mode
+          
+          Runs the TUI in inline mode, preserving terminal scrollback history. This is useful in
+          terminal multiplexers like Zellij that follow the xterm spec strictly and disable
+          scrollback in alternate screen buffers.
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+  -V, --version
+          Print version
+
+exec
+/bin/bash -lc 'codex auth --help' in /home/fao/CXMem
+exec
+/bin/bash -lc 'codex login --help' in /home/fao/CXMem
+ succeeded in 0ms:
+Codex CLI
+
+If no subcommand is specified, options will be forwarded to the interactive CLI.
+
+Usage: codex [OPTIONS] [PROMPT]
+       codex [OPTIONS] <COMMAND> [ARGS]
+
+Commands:
+  exec         Run Codex non-interactively [aliases: e]
+  review       Run a code review non-interactively
+  login        Manage login
+  logout       Remove stored authentication credentials
+  mcp          Manage external MCP servers for Codex
+  plugin       Manage Codex plugins
+  mcp-server   Start Codex as an MCP server (stdio)
+  app-server   [experimental] Run the app server or related tooling
+  completion   Generate shell completion scripts
+  update       Update Codex to the latest version
+  sandbox      Run commands within a Codex-provided sandbox
+  debug        Debugging tools
+  apply        Apply the latest diff produced by Codex agent as a `git apply` to your local working
+               tree [aliases: a]
+  resume       Resume a previous interactive session (picker by default; use --last to continue the
+               most recent)
+  fork         Fork a previous interactive session (picker by default; use --last to fork the most
+               recent)
+  cloud        [EXPERIMENTAL] Browse tasks from Codex Cloud and apply changes locally
+  exec-server  [EXPERIMENTAL] Run the standalone exec-server service
+  features     Inspect feature flags
+  help         Print this message or the help of the given subcommand(s)
+
+Arguments:
+  [PROMPT]
+          Optional user prompt to start the session
+
+Options:
+  -c, --config <key=value>
+          Override a configuration value that would otherwise be loaded from `~/.codex/config.toml`.
+          Use a dotted path (`foo.bar.baz`) to override nested values. The `value` portion is parsed
+          as TOML. If it fails to parse as TOML, the raw string is used as a literal.
+          
+          Examples: - `-c model="o3"` - `-c 'sandbox_permissions=["disk-full-read-access"]'` - `-c
+          shell_environment_policy.inherit=all`
+
+      --enable <FEATURE>
+          Enable a feature (repeatable). Equivalent to `-c features.<name>=true`
+
+      --disable <FEATURE>
+          Disable a feature (repeatable). Equivalent to `-c features.<name>=false`
+
+      --remote <ADDR>
+          Connect the TUI to a remote app server websocket endpoint.
+          
+          Accepted forms: `ws://host:port` or `wss://host:port`.
+
+      --remote-auth-token-env <ENV_VAR>
+          Name of the environment variable containing the bearer token to send to a remote app
+          server websocket
+
+  -i, --image <FILE>...
+          Optional image(s) to attach to the initial prompt
+
+  -m, --model <MODEL>
+          Model the agent should use
+
+      --oss
+          Use open-source provider
+
+      --local-provider <OSS_PROVIDER>
+          Specify which local provider to use (lmstudio or ollama). If not specified with --oss,
+          will use config default or show selection
+
+  -p, --profile <CONFIG_PROFILE>
+          Configuration profile from config.toml to specify default options
+
+  -s, --sandbox <SANDBOX_MODE>
+          Select the sandbox policy to use when executing model-generated shell commands
+          
+          [possible values: read-only, workspace-write, danger-full-access]
+
+      --dangerously-bypass-approvals-and-sandbox
+          Skip all confirmation prompts and execute commands without sandboxing. EXTREMELY
+          DANGEROUS. Intended solely for running in environments that are externally sandboxed
+
+  -C, --cd <DIR>
+          Tell the agent to use the specified directory as its working root
+
+      --add-dir <DIR>
+          Additional directories that should be writable alongside the primary workspace
+
+  -a, --ask-for-approval <APPROVAL_POLICY>
+          Configure when the model requires human approval before executing a command
+
+          Possible values:
+          - untrusted:  Only run "trusted" commands (e.g. ls, cat, sed) without asking for user
+            approval. Will escalate to the user if the model proposes a command that is not in the
+            "trusted" set
+          - on-failure: DEPRECATED: Run all commands without asking for user approval. Only asks for
+            approval if a command fails to execute, in which case it will escalate to the user to
+            ask for un-sandboxed execution. Prefer `on-request` for interactive runs or `never` for
+            non-interactive runs
+          - on-request: The model decides when to ask the user for approval
+          - never:      Never ask for user approval Execution failures are immediately returned to
+            the model
+
+      --search
+          Enable live web search. When enabled, the native Responses `web_search` tool is available
+          to the model (no per‑call approval)
+
+      --no-alt-screen
+          Disable alternate screen mode
+          
+          Runs the TUI in inline mode, preserving terminal scrollback history. This is useful in
+          terminal multiplexers like Zellij that follow the xterm spec strictly and disable
+          scrollback in alternate screen buffers.
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+  -V, --version
+          Print version
+
+exec
+/bin/bash -lc 'codex debug --help' in /home/fao/CXMem
+ succeeded in 0ms:
+Manage login
+
+Usage: codex login [OPTIONS] [COMMAND]
+
+Commands:
+  status  Show login status
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+  -c, --config <key=value>
+          Override a configuration value that would otherwise be loaded from `~/.codex/config.toml`.
+          Use a dotted path (`foo.bar.baz`) to override nested values. The `value` portion is parsed
+          as TOML. If it fails to parse as TOML, the raw string is used as a literal.
+          
+          Examples: - `-c model="o3"` - `-c 'sandbox_permissions=["disk-full-read-access"]'` - `-c
+          shell_environment_policy.inherit=all`
+
+      --with-api-key
+          Read the API key from stdin (e.g. `printenv OPENAI_API_KEY | codex login --with-api-key`)
+
+      --enable <FEATURE>
+          Enable a feature (repeatable). Equivalent to `-c features.<name>=true`
+
+      --with-agent-identity
+          Read the experimental Agent Identity token from stdin (e.g. `printenv CODEX_AGENT_IDENTITY
+          | codex login --with-agent-identity`)
+
+      --disable <FEATURE>
+          Disable a feature (repeatable). Equivalent to `-c features.<name>=false`
+
+      --device-auth
+          
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+ succeeded in 0ms:
+Debugging tools
+
+Usage: codex debug [OPTIONS] <COMMAND>
+
+Commands:
+  models        Render the raw model catalog as JSON
+  app-server    Tooling: helps debug the app server
+  prompt-input  Render the model-visible prompt input list as JSON
+  help          Print this message or the help of the given subcommand(s)
+
+Options:
+  -c, --config <key=value>
+          Override a configuration value that would otherwise be loaded from `~/.codex/config.toml`.
+          Use a dotted path (`foo.bar.baz`) to override nested values. The `value` portion is parsed
+          as TOML. If it fails to parse as TOML, the raw string is used as a literal.
+          
+          Examples: - `-c model="o3"` - `-c 'sandbox_permissions=["disk-full-read-access"]'` - `-c
+          shell_environment_policy.inherit=all`
+
+      --enable <FEATURE>
+          Enable a feature (repeatable). Equivalent to `-c features.<name>=true`
+
+      --disable <FEATURE>
+          Disable a feature (repeatable). Equivalent to `-c features.<name>=false`
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+exec
+/bin/bash -lc 'codex login status' in /home/fao/CXMem
+ succeeded in 0ms:
+Logged in using ChatGPT
+
+exec
+/bin/bash -lc "sed -n '1,220p' ~/.codex/config.toml" in /home/fao/CXMem
+ succeeded in 0ms:
+personality = "pragmatic"
+image_generation = true
+
+[marketplaces.superpowers-dev]
+last_updated = "2026-05-06T22:22:59Z"
+last_revision = "f2cbfbefebbfef77321e4c9abc9e949826bea9d7"
+source_type = "git"
+source = "https://github.com/obra/superpowers.git"
+
+[projects."/tmp/dsc-pr/DeFi-Statistic-Center"]
+trust_level = "trusted"
+
+[projects."/tmp/dsc-pr2-review/repo"]
+trust_level = "trusted"
+
+[projects."/tmp/dsc-pr3-review/repo"]
+trust_level = "trusted"
+
+[projects."/home/fao/vault"]
+trust_level = "trusted"
+
+[projects."/home/fao"]
+trust_level = "trusted"
+
+[projects."/tmp/codex-build/2026-04-30-1500-dsc-extractor-v1-stage1/workspace/dsc-extractor"]
+trust_level = "trusted"
+
+[projects."/tmp/claudex-smoke-test"]
+trust_level = "trusted"
+
+[projects."/home/fao/.claude/plugins/claudex"]
+trust_level = "trusted"
+
+[projects."/tmp"]
+trust_level = "trusted"
+
+[projects."/home/fao/vault/projects/claudex/site"]
+trust_level = "trusted"
+
+[projects."/home/fao/vault/knowledge"]
+trust_level = "trusted"
+
+[projects."/home/fao/CXMem"]
+trust_level = "trusted"
+
+exec
+/bin/bash -lc 'codex debug models --help' in /home/fao/CXMem
+ succeeded in 0ms:
+Render the raw model catalog as JSON
+
+Usage: codex debug models [OPTIONS]
+
+Options:
+      --bundled
+          Skip refresh and dump only the bundled catalog shipped with this binary
+
+  -c, --config <key=value>
+          Override a configuration value that would otherwise be loaded from `~/.codex/config.toml`.
+          Use a dotted path (`foo.bar.baz`) to override nested values. The `value` portion is parsed
+          as TOML. If it fails to parse as TOML, the raw string is used as a literal.
+          
+          Examples: - `-c model="o3"` - `-c 'sandbox_permissions=["disk-full-read-access"]'` - `-c
+          shell_environment_policy.inherit=all`
+
+      --enable <FEATURE>
+          Enable a feature (repeatable). Equivalent to `-c features.<name>=true`
+
+      --disable <FEATURE>
+          Disable a feature (repeatable). Equivalent to `-c features.<name>=false`
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+exec
+/bin/bash -lc 'codex mcp --help' in /home/fao/CXMem
+ succeeded in 0ms:
+Manage external MCP servers for Codex
+
+Usage: codex mcp [OPTIONS] <COMMAND>
+
+Commands:
+  list    
+  get     
+  add     
+  remove  
+  login   
+  logout  
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+  -c, --config <key=value>
+          Override a configuration value that would otherwise be loaded from `~/.codex/config.toml`.
+          Use a dotted path (`foo.bar.baz`) to override nested values. The `value` portion is parsed
+          as TOML. If it fails to parse as TOML, the raw string is used as a literal.
+          
+          Examples: - `-c model="o3"` - `-c 'sandbox_permissions=["disk-full-read-access"]'` - `-c
+          shell_environment_policy.inherit=all`
+
+      --enable <FEATURE>
+          Enable a feature (repeatable). Equivalent to `-c features.<name>=true`
+
+      --disable <FEATURE>
+          Disable a feature (repeatable). Equivalent to `-c features.<name>=false`
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+exec
+/bin/bash -lc 'codex mcp list' in /home/fao/CXMem
+ succeeded in 0ms:
+No MCP servers configured yet. Try `codex mcp add my-tool -- my-command`.
+
+exec
+/bin/bash -lc "codex debug prompt-input 'What tools are available?' --skip-git-repo-check" in /home/fao/CXMem
+ exited 2 in 0ms:
+error: unexpected argument '--skip-git-repo-check' found
+
+  tip: to pass '--skip-git-repo-check' as a value, use '-- --skip-git-repo-check'
+
+Usage: codex debug prompt-input <PROMPT>
+
+For more information, try '--help'.
+
+exec
+/bin/bash -lc "codex debug prompt-input --help && codex debug prompt-input 'What tools are available?'" in /home/fao/CXMem
+ succeeded in 839ms:
+[
+  {
+    "type": "message",
+    "role": "developer",
+    "content": [
+      {
+        "type": "input_text",
+        "text": "<permissions instructions>\nFilesystem sandboxing defines which files can be read or written. `sandbox_mode` is `workspace-write`: The sandbox permits reading files, and editing files in `cwd` and `writable_roots`. Editing files in other directories requires approval. Network access is restricted.\n# Escalation Requests\n\nCommands are run outside the sandbox if they are approved by the user, or match an existing rule that allows it to run unrestricted. The command string is split into independent command segments at shell control operators, including but not limited to:\n\n- Pipes: |\n- Logical operators: &&, ||\n- Command separators: ;\n- Subshell boundaries: (...), $(...)\n\nEach resulting segment is evaluated independently for sandbox restrictions and approval requirements.\n\nExample:\n\ngit pull | tee output.txt\n\nThis is treated as two command segments:\n\n[\"git\", \"pull\"]\n\n[\"tee\", \"output.txt\"]\n\nCommands that use more advanced shell features like redirection (>, >>, <), substitutions ($(...), ...), environment variables (FOO=bar), or wildcard patterns (*, ?) will not be evaluated against rules, to limit the scope of what an approved rule allows.\n\n## How to request escalation\n\nIMPORTANT: To request approval to execute a command that will require escalated privileges:\n\n- Provide the `sandbox_permissions` parameter with the value `\"require_escalated\"`\n- Include a short question asking the user if they want to allow the action in `justification` parameter. e.g. \"Do you want to download and install dependencies for this project?\"\n- Optionally suggest a `prefix_rule` - this will be shown to the user with an option to persist the rule approval for future sessions.\n\nIf you run a command that is important to solving the user's query, but it fails because of sandboxing or with a likely sandbox-related network error (for example DNS/host resolution, registry/index access, or dependency download failure), rerun the command with \"require_escalated\". ALWAYS proceed to use the `justification` parameter - do not message the user before requesting approval for the command.\n\n## When to request escalation\n\nWhile commands are running inside the sandbox, here are some scenarios that will require escalation outside the sandbox:\n\n- You need to run a command that writes to a directory that requires it (e.g. running tests that write to /var)\n- You need to run a GUI app (e.g., open/xdg-open/osascript) to open browsers or files.\n- If you run a command that is important to solving the user's query, but it fails because of sandboxing or with a likely sandbox-related network error (for example DNS/host resolution, registry/index access, or dependency download failure), rerun the command with `require_escalated`. ALWAYS proceed to use the `sandbox_permissions` and `justification` parameters. do not message the user before requesting approval for the command.\n- You are about to take a potentially destructive action such as an `rm` or `git reset` that the user did not explicitly ask for.\n- Be judicious with escalating, but if completing the user's request requires it, you should do so - don't try and circumvent approvals by using other tools.\n\n## prefix_rule guidance\n\nWhen choosing a `prefix_rule`, request one that will allow you to fulfill similar requests from the user in the future without re-requesting escalation. It should be categorical and reasonably scoped to similar capabilities. You should rarely pass the entire command into `prefix_rule`.\n\n### Banned prefix_rules \nAvoid requesting overly broad prefixes that the user would be ill-advised to approve. For example, do not request [\"python3\"], [\"python\", \"-\"], or other similar prefixes that would allow arbitrary scripting.\nNEVER provide a prefix_rule argument for destructive commands like rm.\nNEVER provide a prefix_rule if your command uses a heredoc or herestring. \n\n### Examples\nGood examples of prefixes:\n- [\"npm\", \"run\", \"dev\"]\n- [\"gh\", \"pr\", \"check\"]\n- [\"cargo\", \"test\"]\n The writable roots are `/home/fao/CXMem`, `/tmp`, `/home/fao/.codex/memories`.\n</permissions instructions>"
+      },
+      {
+        "type": "input_text",
+        "text": "<skills_instructions>\n## Skills\nA skill is a set of local instructions to follow that is stored in a `SKILL.md` file. Below is the list of skills that can be used. Each entry includes a name, description, and file path so you can open the source for full instructions when using a specific skill.\n### Available skills\n- imagegen: Generate or edit raster images when the task benefits from AI-created bitmap visuals such as photos, illustrations, textures, sprites, mockups, or transparent-background cutouts. Use when Codex should create a brand-new image, transform an existing image, or derive visual variants from references, and the output should be a bitmap asset rather than repo-native code or vector. Do not use when the task is better handled by editing existing SVG/vector/code-native assets, extending an established icon or logo system, or building the visual directly in HTML/CSS/canvas. (file: /home/fao/.codex/skills/.system/imagegen/SKILL.md)\n- openai-docs: Use when the user asks how to build with OpenAI products or APIs and needs up-to-date official documentation with citations, help choosing the latest model for a use case, or model upgrade and prompt-upgrade guidance; prioritize OpenAI docs MCP tools, use bundled references only as helper context, and restrict any fallback browsing to official OpenAI domains. (file: /home/fao/.codex/skills/.system/openai-docs/SKILL.md)\n- plugin-creator: Create and scaffold plugin directories for Codex with a required `.codex-plugin/plugin.json`, optional plugin folders/files, and baseline placeholders you can edit before publishing or testing. Use when Codex needs to create a new local plugin, add optional plugin structure, or generate or update repo-root `.agents/plugins/marketplace.json` entries for plugin ordering and availability metadata. (file: /home/fao/.codex/skills/.system/plugin-creator/SKILL.md)\n- skill-creator: Guide for creating effective skills. This skill should be used when users want to create a new skill (or update an existing skill) that extends Codex's capabilities with specialized knowledge, workflows, or tool integrations. (file: /home/fao/.codex/skills/.system/skill-creator/SKILL.md)\n- skill-installer: Install Codex skills into $CODEX_HOME/skills from a curated list or a GitHub repo path. Use when a user asks to list installable skills, install a curated skill, or install a skill from another repo (including private repos). (file: /home/fao/.codex/skills/.system/skill-installer/SKILL.md)\n### How to use skills\n- Discovery: The list above is the skills available in this session (name + description + file path). Skill bodies live on disk at the listed paths.\n- Trigger rules: If the user names a skill (with `$SkillName` or plain text) OR the task clearly matches a skill's description shown above, you must use that skill for that turn. Multiple mentions mean use them all. Do not carry skills across turns unless re-mentioned.\n- Missing/blocked: If a named skill isn't in the list or the path can't be read, say so briefly and continue with the best fallback.\n- How to use a skill (progressive disclosure):\n  1) After deciding to use a skill, open its `SKILL.md`. Read only enough to follow the workflow.\n  2) When `SKILL.md` references relative paths (e.g., `scripts/foo.py`), resolve them relative to the skill directory listed above first, and only consider other paths if needed.\n  3) If `SKILL.md` points to extra folders such as `references/`, load only the specific files needed for the request; don't bulk-load everything.\n  4) If `scripts/` exist, prefer running or patching them instead of retyping large code blocks.\n  5) If `assets/` or templates exist, reuse them instead of recreating from scratch.\n- Coordination and sequencing:\n  - If multiple skills apply, choose the minimal set that covers the request and state the order you'll use them.\n  - Announce which skill(s) you're using and why (one short line). If you skip an obvious skill, say why.\n- Context hygiene:\n  - Keep context small: summarize long sections instead of pasting them; only load extra files when needed.\n  - Avoid deep reference-chasing: prefer opening only files directly linked from `SKILL.md` unless you're blocked.\n  - When variants exist (frameworks, providers, domains), pick only the relevant reference file(s) and note that choice.\n- Safety and fallback: If a skill can't be applied cleanly (missing files, unclear instructions), state the issue, pick the next-best approach, and continue.\n</skills_instructions>"
+      }
+    ]
+  },
+  {
+    "type": "message",
+    "role": "user",
+    "content": [
+      {
+        "type": "input_text",
+        "text": "<environment_context>\n  <cwd>/home/fao/CXMem</cwd>\n  <shell>bash</shell>\n  <current_date>2026-05-06</current_date>\n  <timezone>America/New_York</timezone>\n</environment_context>"
+      }
+    ]
+  },
+  {
+    "type": "message",
+    "role": "user",
+    "content": [
+      {
+        "type": "input_text",
+        "text": "What tools are available?"
+      }
+    ]
+  }
+]
+
+web search: 
+web search: https://github.com/openai/codex/blob/main/docs/authentication.md
+web search: 
+web search: https://developers.openai.com/codex/auth
+web search: 
+web search: https://developers.openai.com/codex/auth
+web search: 
+web search: https://developers.openai.com/codex/auth
+web search: 
+web search: https://developers.openai.com/codex/noninteractive
+web search: 
+web search: 
+web search: 
+web search: https://developers.openai.com/api/docs/models/gpt-image-2
+web search: 
+web search: https://developers.openai.com/api/docs/guides/image-generation
+web search: 
+web search: https://developers.openai.com/api/docs/guides/image-generation
+web search: 
+web search: https://developers.openai.com/api/docs/models/gpt-image-1-mini
+codex
+I’ve got the main verification points now: `gpt-image-2` exists as of April 21, 2026; `gpt-image-2.0` is not the API model ID; and Codex `exec` has its own auth path where `CODEX_API_KEY` is the documented one-shot env var. I’m going to draft the report directly to the requested Markdown file.
+exec
+/bin/bash -lc 'ls -ld /home/fao/CXMem/notes /home/fao/CXMem/notes/research' in /home/fao/CXMem
+ succeeded in 0ms:
+drwxrwxr-x 3 fao fao 4096 May  6 18:22 /home/fao/CXMem/notes
+drwxrwxr-x 2 fao fao 4096 May  6 18:22 /home/fao/CXMem/notes/research
+
+apply patch
+patch: completed
+/home/fao/CXMem/notes/research/codex-image-gen.md
+diff --git a/notes/research/codex-image-gen.md b/notes/research/codex-image-gen.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..b6ef42735d8e90e20fdf3185664944177449c14f
+--- /dev/null
++++ b/notes/research/codex-image-gen.md
+@@ -0,0 +1,611 @@
++# Programmatic OpenAI Image Generation from Codex CLI
++
++Research date: 2026-05-06
++
++## 1. **Model landscape (verified 2026-05)**
++
++OpenAI's current API image-generation family is GPT Image. The real latest API model ID is `gpt-image-2`, released April 21, 2026. It is the current state-of-the-art image generation/editing model and supports flexible image sizes, high-fidelity image inputs, token-based image pricing, and Batch API support.
++
++There is no verified API model ID named `gpt-image-2.0`. Hao's "gpt image 2.0" maps to the product/system-card naming "ChatGPT Images 2.0" and to the API model ID `gpt-image-2`, not `gpt-image-2.0`.
++
++Current lineup:
++
++| Model ID | Status | Release / snapshot | What it supersedes | Notes |
++|---|---:|---:|---|---|
++| `gpt-image-2` | Latest | Released 2026-04-21; snapshot `gpt-image-2-2026-04-21` | Supersedes `gpt-image-1.5` for best quality/capability | Fast, high-quality generation and editing; flexible image sizes; high-fidelity inputs. |
++| `gpt-image-1.5` | Previous | Released 2025-12-16; snapshot `gpt-image-1.5-2025-12-16` | Superseded `gpt-image-1` | Stronger prompt adherence than `gpt-image-1`; still supported. |
++| `gpt-image-1-mini` | Cost-efficient | Released 2025-10-06 | Lower-cost alternative to GPT Image 1 family | Cheapest current GPT Image option. |
++| `gpt-image-1` | Deprecated / previous | Original GPT Image API model | Superseded by `gpt-image-1.5`, then `gpt-image-2` | Model page marks it deprecated. |
++| `chatgpt-image-latest` | ChatGPT image alias | Released 2025-12-16 with GPT Image 1.5 | Alias for model used in ChatGPT Images | Useful only if you deliberately want ChatGPT-aligned behavior; docs emphasize API model IDs above. |
++| `dall-e-2`, `dall-e-3` | Deprecated legacy | Deprecation date in docs: support ends 2026-05-12 | Superseded by GPT Image models | `dall-e-2` is still the only variation endpoint model. |
++
++Docs caveat: some older OpenAI image guide/API reference pages and snippets still mention only `gpt-image-1.5`, `gpt-image-1`, and `gpt-image-1-mini`, or say GPT Image 1.5 is latest. The model page, pricing page, and 2026-04-21 changelog confirm `gpt-image-2` is current.
++
++## 2. **Capabilities matrix**
++
++| Capability | `gpt-image-2` | `gpt-image-1.5` | `gpt-image-1-mini` | `gpt-image-1` | DALL-E legacy |
++|---|---|---|---|---|---|
++| Generate endpoint | `/v1/images/generations` | Same | Same | Same | Same |
++| Edit/inpaint endpoint | `/v1/images/edits` | Same | Same | Same | `dall-e-2` edits; `dall-e-3` generations only |
++| Variation endpoint | No | No | No | No | `dall-e-2` only |
++| Response format | GPT Image models return `b64_json` by default; `url` unsupported | Same | Same | Same | `url` default; `b64_json` optional |
++| Output formats | `png`, `jpeg`, `webp` | Same | Same | Same | Legacy behavior differs; use GPT Image unless variation required |
++| Transparency / alpha | `background=transparent`, only with `png` or `webp` | Same | Same | Same | Not a GPT Image-style feature |
++| Prompt max length | 32,000 chars for GPT Image models | Same | Same | Same | `dall-e-2`: 1,000; `dall-e-3`: 4,000 |
++| Images per generation request | `n` 1-10 per API reference; verify current SDK behavior for `gpt-image-2` | Same documented range | Same documented range | Same documented range | `dall-e-3`: only `n=1` |
++| Edit input limits | Up to 16 images; each GPT Image input `png`, `webp`, or `jpg`, <50 MB | Same | Same | Same | `dall-e-2`: one square PNG <4 MB |
++| Input fidelity | Always high; `input_fidelity` cannot be changed | Supports fidelity control; docs note first 5 input images get higher preservation | Supports high fidelity; first image best preserved | Supports high fidelity; first image best preserved | Legacy |
++| Sizes | Flexible sizes; thousands of valid resolutions; examples include `1024x1024`, `1024x1536`, `1536x1024` | `1024x1024`, `1024x1536`, `1536x1024`, `auto` | Same | Same | Legacy sizes differ |
++| Quality tiers | `low`, `medium`, `high`, `auto` | Same | Same | Same | Legacy-specific |
++| Streaming partial images | Image API and Responses API support partial images; model pages say model "Streaming: Not supported", so treat streaming as endpoint/tool streaming, not model feature | Same caveat | Same caveat | Same caveat | Not primary path |
++| Content policy | Prompts and generated images filtered; `moderation=auto` or `low` for GPT Image models | Same | Same | Same | Filtered |
++| Latency | Docs: complex prompts may take up to 2 minutes | Same | Same | Same | Varies |
++
++Pricing shown below is output image cost for common sizes, excluding input text tokens and edit input image tokens. GPT Image models bill by tokens; total cost is input text + input images if editing + image output tokens.
++
++| Model | Quality | 1024x1024 | 1024x1536 | 1536x1024 |
++|---|---:|---:|---:|---:|
++| `gpt-image-2` | low | $0.006 | $0.005 | $0.005 |
++| `gpt-image-2` | medium | $0.053 | $0.041 | $0.041 |
++| `gpt-image-2` | high | $0.211 | $0.165 | $0.165 |
++| `gpt-image-1.5` | low | $0.009 | $0.013 | $0.013 |
++| `gpt-image-1.5` | medium | $0.034 | $0.050 | $0.050 |
++| `gpt-image-1.5` | high | $0.133 | $0.200 | $0.200 |
++| `gpt-image-1` | low | $0.011 | $0.016 | $0.016 |
++| `gpt-image-1` | medium | $0.042 | $0.063 | $0.063 |
++| `gpt-image-1` | high | $0.167 | $0.250 | $0.250 |
++| `gpt-image-1-mini` | low | $0.005 | $0.006 | $0.006 |
++| `gpt-image-1-mini` | medium | $0.011 | $0.015 | $0.015 |
++| `gpt-image-1-mini` | high | $0.036 | $0.052 | $0.052 |
++
++Token prices per 1M tokens:
++
++| Model | Text input | Text cached input | Text output | Image input | Image cached input | Image output |
++|---|---:|---:|---:|---:|---:|---:|
++| `gpt-image-2` | $5.00 | $1.25 | n/a | $8.00 | $2.00 | $30.00 |
++| `gpt-image-1.5` | $5.00 | $1.25 | $10.00 | $8.00 | $2.00 | $32.00 |
++| `gpt-image-1-mini` | $2.00 | $0.20 | n/a | $2.50 | $0.25 | $8.00 |
++| `gpt-image-1` | $5.00 | $1.25 | n/a | $10.00 | $2.50 | $40.00 |
++
++## 3. **API invocation — raw HTTP**
++
++Minimal generation request, returning base64 image data and saving it locally:
++
++```bash
++prompt='A crisp product photo of a matte black mechanical keyboard on a white desk'
++
++jq -n \
++  --arg model "gpt-image-2" \
++  --arg prompt "$prompt" \
++  '{
++    model: $model,
++    prompt: $prompt,
++    size: "1024x1024",
++    quality: "medium",
++    output_format: "png"
++  }' \
++| curl -sS -D /tmp/openai-img.headers \
++    -X POST "https://api.openai.com/v1/images/generations" \
++    -H "Authorization: Bearer $OPENAI_API_KEY" \
++    -H "Content-Type: application/json" \
++    --data-binary @- \
++| tee /tmp/openai-img.response.json \
++| jq -r '.data[0].b64_json' \
++| base64 --decode > ./image.png
++```
++
++Request JSON shape:
++
++```json
++{
++  "model": "gpt-image-2",
++  "prompt": "A crisp product photo of a matte black mechanical keyboard on a white desk",
++  "size": "1024x1024",
++  "quality": "medium",
++  "n": 1,
++  "output_format": "png",
++  "background": "opaque",
++  "moderation": "auto"
++}
++```
++
++For GPT Image models, expect `data[0].b64_json`; `data[0].url` is unsupported. For DALL-E legacy models, `url` may be returned. A defensive decoder:
++
++```bash
++if jq -e '.data[0].b64_json' response.json >/dev/null; then
++  jq -r '.data[0].b64_json' response.json | base64 --decode > image.png
++elif jq -e '.data[0].url' response.json >/dev/null; then
++  curl -L "$(jq -r '.data[0].url' response.json)" -o image.png
++else
++  jq . response.json >&2
++  exit 1
++fi
++```
++
++Transparent PNG:
++
++```json
++{
++  "model": "gpt-image-2",
++  "prompt": "A flat icon of a fountain pen, transparent background",
++  "size": "1024x1024",
++  "quality": "high",
++  "output_format": "png",
++  "background": "transparent"
++}
++```
++
++Common error modes:
++
++```json
++{
++  "error": {
++    "message": "Rate limit reached for images per minute.",
++    "type": "rate_limit_error",
++    "param": null,
++    "code": "rate_limit_exceeded"
++  }
++}
++```
++
++Handle with exponential backoff using `Retry-After`, `x-ratelimit-reset-requests`, or a bounded sleep. Avoid fan-out above the account's IPM limit.
++
++```json
++{
++  "error": {
++    "message": "Your request was rejected as a result of our safety system.",
++    "type": "invalid_request_error",
++    "param": "prompt",
++    "code": "content_policy_violation"
++  }
++}
++```
++
++Handle by recording the refusal, returning a clear message to the user, and optionally asking for a revised prompt. Do not blindly retry unchanged prompts after content-policy refusals.
++
++## 4. **API invocation — OpenAI Python/Node SDKs**
++
++Python one-shot:
++
++```python
++#!/usr/bin/env python3
++import base64
++from openai import OpenAI
++
++client = OpenAI()  # reads OPENAI_API_KEY
++
++result = client.images.generate(
++    model="gpt-image-2",
++    prompt="A crisp product photo of a matte black mechanical keyboard on a white desk",
++    size="1024x1024",
++    quality="medium",
++    output_format="png",
++    n=1,
++)
++
++with open("image.png", "wb") as f:
++    f.write(base64.b64decode(result.data[0].b64_json))
++```
++
++Node one-shot:
++
++```javascript
++#!/usr/bin/env node
++import fs from "node:fs";
++import OpenAI from "openai";
++
++const client = new OpenAI(); // reads OPENAI_API_KEY
++
++const result = await client.images.generate({
++  model: "gpt-image-2",
++  prompt: "A crisp product photo of a matte black mechanical keyboard on a white desk",
++  size: "1024x1024",
++  quality: "medium",
++  output_format: "png",
++  n: 1,
++});
++
++fs.writeFileSync("image.png", Buffer.from(result.data[0].b64_json, "base64"));
++```
++
++Responses API path, useful for multi-turn prompting but less direct for `/img`:
++
++```python
++import base64
++from openai import OpenAI
++
++client = OpenAI()
++response = client.responses.create(
++    model="gpt-5.5",
++    input="Generate an image of a matte black mechanical keyboard on a white desk",
++    tools=[{"type": "image_generation", "quality": "medium"}],
++    tool_choice={"type": "image_generation"},
++)
++
++images = [o.result for o in response.output if o.type == "image_generation_call"]
++with open("image.png", "wb") as f:
++    f.write(base64.b64decode(images[0]))
++```
++
++For a simple `/img <prompt>` skill, prefer the Images API. It is simpler, exposes image-specific parameters directly, and avoids an extra mainline model step.
++
++## 5. **Codex CLI integration paths**
++
++### Built-in image generation in Codex CLI 0.128.0
++
++I found no `codex` subcommand that directly generates images, and `codex mcp list` reports no configured MCP servers on this machine. `codex exec --help` exposes image inputs via `--image`, but not an image-output generation command.
++
++OpenAI's API docs describe an `image_generation` hosted tool in the Responses API. That is an API tool, not a `codex exec` command-line image generator. In Codex CLI 0.128.0, the practical path is to let the Codex agent run `curl` or a helper script that calls `/v1/images/generations`.
++
++### Recommended pattern
++
++| Pattern | Recommendation | Why |
++|---|---|---|
++| `curl` directly inside `codex exec` | Good for minimal proof-of-concept | No dependencies except `curl`, `jq`, `base64`; more shell quoting risk. |
++| Python helper invoked by Codex | Best default | Cleaner error handling, metadata capture, retries, path handling; SDK reads `OPENAI_API_KEY`. |
++| Node helper invoked by Codex | Good if downstream skill is JS-heavy | Same benefits as Python, but more npm dependency surface. |
++| Responses API image tool inside Codex | Use only for conversational/multi-turn image workflows | More moving parts and cost; not needed for one-shot `/img`. |
++| Codex built-in/MCP image tool | Not available by default in this verified CLI install | Could be added later via MCP/plugin, but do not assume it. |
++
++### `codex exec` invocation from an orchestrator
++
++Use a writable output directory and network access. In current local help, available sandbox modes are `read-only`, `workspace-write`, and `danger-full-access`; official docs also describe explicit sandbox selection for automation.
++
++Conservative version if output stays under the workspace and network is allowed by the environment/config:
++
++```bash
++mkdir -p ./artifacts/img/2026-05-06/run-001
++
++CODEX_API_KEY="${CODEX_API_KEY:-$OPENAI_API_KEY}" \
++codex exec \
++  --cd /home/fao/CXMem \
++  --sandbox workspace-write \
++  --ask-for-approval never \
++  --output-last-message ./artifacts/img/2026-05-06/run-001/codex-final.md \
++  'Generate one image using ./bin/img-gen.sh or curl. Prompt: "A crisp product photo of a matte black mechanical keyboard on a white desk". Save output under ./artifacts/img/2026-05-06/run-001 and report file paths only.'
++```
++
++If the parent process is already externally sandboxed and you need guaranteed network/filesystem access:
++
++```bash
++CODEX_API_KEY="${CODEX_API_KEY:-$OPENAI_API_KEY}" \
++codex exec \
++  --cd /home/fao/CXMem \
++  --sandbox danger-full-access \
++  --ask-for-approval never \
++  --output-last-message ./artifacts/img/2026-05-06/run-001/codex-final.md \
++  'Generate one image ...'
++```
++
++For machine-readable orchestration, add `--json` and parse JSONL events, or use `--output-schema` for a strict final result. `--output-last-message` writes the final message to a file and still prints it to stdout.
++
++### Auth behavior
++
++There are two separate auth concerns:
++
++1. The helper script/curl that calls the Images API should use `OPENAI_API_KEY` in the standard API way:
++
++```bash
++Authorization: Bearer $OPENAI_API_KEY
++```
++
++2. `codex exec` itself uses Codex CLI auth. Official Codex docs say `codex exec` reuses saved CLI authentication by default, and for CI/programmatic one-shot runs `CODEX_API_KEY` is supported only in `codex exec`:
++
++```bash
++CODEX_API_KEY="$OPENAI_API_KEY" codex exec --json "triage open bug reports"
++```
++
++Local verification on this machine:
++
++```text
++$ codex --version
++codex-cli 0.128.0
++
++$ codex login status
++Logged in using ChatGPT
++
++$ codex login --help
++--with-api-key  Read the API key from stdin
++```
++
++So, do not assume `codex exec` itself reads `OPENAI_API_KEY` directly. Use one of these:
++
++```bash
++# One-shot API-key auth for the Codex agent:
++CODEX_API_KEY="$OPENAI_API_KEY" codex exec ...
++
++# Or cache API-key auth in Codex:
++printenv OPENAI_API_KEY | codex login --with-api-key
++codex exec ...
++
++# Or use existing ChatGPT login:
++codex login
++codex exec ...
++```
++
++Inside the agent-run shell, ensure `OPENAI_API_KEY` reaches subprocesses. Codex has a `shell_environment_policy`; secrets may be filtered unless explicitly passed or configured. For image generation, the cleanest pattern is to have the parent invoke:
++
++```bash
++OPENAI_API_KEY="$OPENAI_API_KEY" CODEX_API_KEY="$OPENAI_API_KEY" codex exec ...
++```
++
++If a restrictive Codex config blocks secret inheritance, add a scoped config override only for this run:
++
++```bash
++codex exec \
++  -c 'shell_environment_policy.inherit="all"' \
++  ...
++```
++
++Use that carefully because it can expose more env vars to the agent's shell commands.
++
++## 6. **Reference helper script**
++
++Copy-paste as `bin/img-gen.sh`. This uses only `bash`, `curl`, `jq`, and `base64`; it does not require the Python or Node SDK.
++
++```bash
++#!/usr/bin/env bash
++set -euo pipefail
++
++model="gpt-image-2"
++size="1024x1024"
++quality="medium"
++n="1"
++format="png"
++background="auto"
++moderation="auto"
++prompt=""
++out=""
++
++usage() {
++  cat >&2 <<'USAGE'
++Usage:
++  img-gen.sh --prompt PROMPT --out OUT [--size SIZE] [--quality low|medium|high|auto] [--n N]
++
++Options:
++  --prompt       Text prompt. Required.
++  --out          Output file for n=1, or output directory/prefix for n>1. Required.
++  --size         Default: 1024x1024. For gpt-image-2, additional valid sizes exist.
++  --quality      Default: medium.
++  --n            Default: 1. Documented range: 1-10.
++  --model        Default: gpt-image-2.
++  --format       png|jpeg|webp. Default: png.
++  --background   auto|opaque|transparent. Default: auto.
++  --moderation   auto|low. Default: auto.
++USAGE
++}
++
++while [[ $# -gt 0 ]]; do
++  case "$1" in
++    --prompt) prompt="${2:-}"; shift 2 ;;
++    --out) out="${2:-}"; shift 2 ;;
++    --size) size="${2:-}"; shift 2 ;;
++    --quality) quality="${2:-}"; shift 2 ;;
++    --n) n="${2:-}"; shift 2 ;;
++    --model) model="${2:-}"; shift 2 ;;
++    --format) format="${2:-}"; shift 2 ;;
++    --background) background="${2:-}"; shift 2 ;;
++    --moderation) moderation="${2:-}"; shift 2 ;;
++    -h|--help) usage; exit 0 ;;
++    *) echo "Unknown argument: $1" >&2; usage; exit 2 ;;
++  esac
++done
++
++if [[ -z "$prompt" || -z "$out" ]]; then
++  usage
++  exit 2
++fi
++
++if [[ -z "${OPENAI_API_KEY:-}" ]]; then
++  echo "OPENAI_API_KEY is not set" >&2
++  exit 2
++fi
++
++tmpdir="$(mktemp -d)"
++trap 'rm -rf "$tmpdir"' EXIT
++
++request="$tmpdir/request.json"
++response="$tmpdir/response.json"
++headers="$tmpdir/headers.txt"
++
++jq -n \
++  --arg model "$model" \
++  --arg prompt "$prompt" \
++  --arg size "$size" \
++  --arg quality "$quality" \
++  --arg format "$format" \
++  --arg background "$background" \
++  --arg moderation "$moderation" \
++  --argjson n "$n" \
++  '{
++    model: $model,
++    prompt: $prompt,
++    size: $size,
++    quality: $quality,
++    n: $n,
++    output_format: $format,
++    background: $background,
++    moderation: $moderation
++  }' > "$request"
++
++http_code="$(
++  curl -sS \
++    -w '%{http_code}' \
++    -D "$headers" \
++    -o "$response" \
++    -X POST "https://api.openai.com/v1/images/generations" \
++    -H "Authorization: Bearer $OPENAI_API_KEY" \
++    -H "Content-Type: application/json" \
++    --data-binary @"$request"
++)"
++
++if [[ "$http_code" != 2* ]]; then
++  echo "OpenAI image request failed: HTTP $http_code" >&2
++  jq -r '.error | "type=\(.type // "unknown") code=\(.code // "unknown") message=\(.message // "no message")"' "$response" >&2 || cat "$response" >&2
++  echo "x-request-id: $(grep -i '^x-request-id:' "$headers" | awk '{print $2}' | tr -d '\r')" >&2
++  exit 1
++fi
++
++count="$(jq '.data | length' "$response")"
++mkdir -p "$(dirname "$out")"
++
++if [[ "$count" -eq 1 && "$n" -eq 1 ]]; then
++  jq -r '.data[0].b64_json' "$response" | base64 --decode > "$out"
++  meta="${out%.*}.json"
++  jq --arg output "$out" --arg request_id "$(grep -i '^x-request-id:' "$headers" | awk '{print $2}' | tr -d '\r')" \
++    '{created, background, output_format, quality, size, usage, output: $output, request_id: $request_id}' \
++    "$response" > "$meta"
++  printf '%s\n' "$out"
++else
++  mkdir -p "$out"
++  for i in $(seq 0 $((count - 1))); do
++    file="$out/image-$((i + 1)).$format"
++    jq -r ".data[$i].b64_json" "$response" | base64 --decode > "$file"
++    printf '%s\n' "$file"
++  done
++  jq --arg output_dir "$out" --arg request_id "$(grep -i '^x-request-id:' "$headers" | awk '{print $2}' | tr -d '\r')" \
++    '{created, background, output_format, quality, size, usage, output_dir: $output_dir, request_id: $request_id}' \
++    "$response" > "$out/metadata.json"
++fi
++```
++
++Example:
++
++```bash
++bin/img-gen.sh \
++  --prompt "A crisp product photo of a matte black mechanical keyboard on a white desk" \
++  --out ./artifacts/img/2026-05-06/run-001/image.png \
++  --size 1024x1024 \
++  --quality medium \
++  --n 1
++```
++
++## 7. **Skill-design implications for `/img`**
++
++Single-agent path:
++
++```bash
++run_id="$(date -u +%Y%m%dT%H%M%SZ)-$(openssl rand -hex 3)"
++out_dir="/home/fao/CXMem/artifacts/img/$run_id"
++mkdir -p "$out_dir"
++
++OPENAI_API_KEY="$OPENAI_API_KEY" CODEX_API_KEY="${CODEX_API_KEY:-$OPENAI_API_KEY}" \
++codex exec \
++  --cd /home/fao/CXMem \
++  --sandbox workspace-write \
++  --ask-for-approval never \
++  --output-last-message "$out_dir/codex-final.md" \
++  "Use bin/img-gen.sh to generate one image for this prompt: $PROMPT. Save it as $out_dir/image.png. Write metadata as $out_dir/metadata.json. Final answer must be JSON with output_path, metadata_path, model, size, quality."
++```
++
++Multi-agent path:
++
++```bash
++for i in 1 2 3 4; do
++  out_dir="/home/fao/CXMem/artifacts/img/$run_id/variant-$i"
++  mkdir -p "$out_dir"
++  (
++    style_hint="$(jq -r ".[$((i-1))]" styles.json)"
++    OPENAI_API_KEY="$OPENAI_API_KEY" CODEX_API_KEY="${CODEX_API_KEY:-$OPENAI_API_KEY}" \
++    codex exec \
++      --cd /home/fao/CXMem \
++      --sandbox workspace-write \
++      --ask-for-approval never \
++      --output-last-message "$out_dir/codex-final.md" \
++      "Generate one image with style hint '$style_hint'. Prompt: $PROMPT. Save image and metadata under $out_dir."
++  ) &
++done
++wait
++```
++
++Suggested output convention:
++
++```text
++artifacts/img/
++  20260506T231500Z-a1b2c3/
++    manifest.json
++    prompt.txt
++    variant-1/
++      image.png
++      metadata.json
++      codex-final.md
++      response.json
++    variant-2/
++      image.png
++      metadata.json
++      codex-final.md
++```
++
++Record metadata beside every image:
++
++```json
++{
++  "prompt_original": "...",
++  "prompt_effective": "...",
++  "model": "gpt-image-2",
++  "size": "1024x1024",
++  "quality": "medium",
++  "n": 1,
++  "output_format": "png",
++  "background": "auto",
++  "moderation": "auto",
++  "created_at": "2026-05-06T23:15:00Z",
++  "request_id": "req_...",
++  "usage": {
++    "input_tokens": 0,
++    "output_tokens": 0,
++    "total_tokens": 0
++  },
++  "estimated_cost_usd": 0.053,
++  "codex": {
++    "version": "0.128.0",
++    "sandbox": "workspace-write",
++    "auth_mode": "CODEX_API_KEY or cached ChatGPT"
++  },
++  "source_files": []
++}
++```
++
++Failure handling:
++
++| Failure | Handling |
++|---|---|
++| Rate limit / 429 | Retry with exponential backoff and jitter; honor `Retry-After` or rate-limit reset headers; cap retries at 3-5. |
++| Transient 5xx / network | Retry with backoff; preserve failed response and request ID. |
++| Content policy refusal | Do not retry unchanged; record refusal and return a prompt-revision request. |
++| Missing `OPENAI_API_KEY` | Fail before dispatching Codex agents. |
++| Codex auth missing | Use `CODEX_API_KEY="$OPENAI_API_KEY"` for exec, or run `printenv OPENAI_API_KEY \| codex login --with-api-key`. |
++| Partial multi-agent failure | Keep successful variants; write a top-level manifest listing failed variants and reasons. |
++
++## 8. **Open questions / risks**
++
++1. `gpt-image-2` supports flexible sizes, but the docs do not expose a complete machine-readable list of valid width/height constraints in the pages consulted. The skill should validate common sizes locally and pass through custom sizes only after empirical testing.
++2. The API reference enum page consulted still omits `gpt-image-2` in one model enum section while the model page, changelog, pricing, and guide confirm it. Treat this as stale reference generation.
++3. Streaming docs and model pages are semantically inconsistent: guides show endpoint/tool partial-image streaming, while model pages say model streaming is not supported. For `/img`, avoid streaming unless user experience requires it.
++4. `n=1..10` is documented for image generation, but parallel single-image requests are often easier to isolate and retry than one `n>1` request. Test account-specific IPM and latency before choosing the default.
++5. `CODEX_API_KEY` is documented as `codex exec`-only. `OPENAI_API_KEY` remains the standard SDK/curl variable. The orchestrator should set both when launching Codex workers.
++6. Codex shell environment filtering can suppress secrets. A downstream skill must test whether `OPENAI_API_KEY` reaches the agent's shell under Hao's actual `~/.codex/config.toml`.
++7. Costs can differ from the table for `gpt-image-2` custom sizes. Use returned `usage` plus pricing tables for post-hoc accounting.
++
++## 9. **Source list**
++
++| URL | What it confirmed |
++|---|---|
++| https://developers.openai.com/api/docs/changelog | `gpt-image-2` released 2026-04-21; `gpt-image-1.5` released 2025-12-16; `gpt-image-1-mini` released 2025-10-06; Batch/API updates. |
++| https://developers.openai.com/api/docs/models/gpt-image-2 | Current `gpt-image-2` model page, snapshot `gpt-image-2-2026-04-21`, endpoints, rate limits, state-of-the-art description. |
++| https://developers.openai.com/api/docs/guides/image-generation | Generation/edit examples, GPT Image parameters, moderation, transparency, latency, flexible sizes, pricing calculator table. |
++| https://developers.openai.com/api/docs/pricing | Token prices for `gpt-image-2`, `gpt-image-1.5`, and `gpt-image-1-mini`; Batch discount. |
++| https://developers.openai.com/api/docs/models/gpt-image-1.5 | `gpt-image-1.5` pricing, snapshot, endpoints, previous-model status. |
++| https://developers.openai.com/api/docs/models/gpt-image-1-mini | `gpt-image-1-mini` cost-efficient status, pricing, endpoints. |
++| https://developers.openai.com/api/docs/models/gpt-image-1 | `gpt-image-1` previous/deprecated status, pricing, endpoints. |
++| https://developers.openai.com/api/reference/resources/images | Image API response fields, b64 vs url behavior, prompt length, n range, edit limits; noted stale enum inconsistency around `gpt-image-2`. |
++| https://openai.com/index/new-chatgpt-images-is-here/ | Public release context for ChatGPT Images / GPT Image 1.5 and product naming. |
++| https://deploymentsafety.openai.com/chatgpt-images-2-0/chatgpt-images-2-0.pdf | Confirms "ChatGPT Images 2.0" product/system-card naming, distinct from the API model ID `gpt-image-2`. |
++| https://developers.openai.com/codex/auth | Codex auth methods, ChatGPT vs API key, local credential cache, headless/device auth, credential storage. |
++| https://developers.openai.com/codex/noninteractive | `codex exec` automation behavior, sandbox guidance, `--json`, `--output-last-message`, and `CODEX_API_KEY` for CI/programmatic runs. |
++| https://developers.openai.com/codex/config-basic | Codex config file precedence and user/project config locations. |
++| https://developers.openai.com/codex/config-advanced | Shell environment policy and sandbox/network configuration details. |
++| https://developers.openai.com/codex/config-reference | MCP configuration and environment variable forwarding details. |
++| https://github.com/openai/codex/blob/main/docs/authentication.md | Official repo points auth docs to developers.openai.com. |
++| https://www.mintlify.com/openai/codex/cli/exec | Unofficial generated CLI reference used only as a secondary cross-check for `codex exec` flags. |
++
+
+diff --git a/notes/research/codex-image-gen.md b/notes/research/codex-image-gen.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..b6ef42735d8e90e20fdf3185664944177449c14f
+--- /dev/null
++++ b/notes/research/codex-image-gen.md
+@@ -0,0 +1,611 @@
++# Programmatic OpenAI Image Generation from Codex CLI
++
++Research date: 2026-05-06
++
++## 1. **Model landscape (verified 2026-05)**
++
++OpenAI's current API image-generation family is GPT Image. The real latest API model ID is `gpt-image-2`, released April 21, 2026. It is the current state-of-the-art image generation/editing model and supports flexible image sizes, high-fidelity image inputs, token-based image pricing, and Batch API support.
++
++There is no verified API model ID named `gpt-image-2.0`. Hao's "gpt image 2.0" maps to the product/system-card naming "ChatGPT Images 2.0" and to the API model ID `gpt-image-2`, not `gpt-image-2.0`.
++
++Current lineup:
++
++| Model ID | Status | Release / snapshot | What it supersedes | Notes |
++|---|---:|---:|---|---|
++| `gpt-image-2` | Latest | Released 2026-04-21; snapshot `gpt-image-2-2026-04-21` | Supersedes `gpt-image-1.5` for best quality/capability | Fast, high-quality generation and editing; flexible image sizes; high-fidelity inputs. |
++| `gpt-image-1.5` | Previous | Released 2025-12-16; snapshot `gpt-image-1.5-2025-12-16` | Superseded `gpt-image-1` | Stronger prompt adherence than `gpt-image-1`; still supported. |
++| `gpt-image-1-mini` | Cost-efficient | Released 2025-10-06 | Lower-cost alternative to GPT Image 1 family | Cheapest current GPT Image option. |
++| `gpt-image-1` | Deprecated / previous | Original GPT Image API model | Superseded by `gpt-image-1.5`, then `gpt-image-2` | Model page marks it deprecated. |
++| `chatgpt-image-latest` | ChatGPT image alias | Released 2025-12-16 with GPT Image 1.5 | Alias for model used in ChatGPT Images | Useful only if you deliberately want ChatGPT-aligned behavior; docs emphasize API model IDs above. |
++| `dall-e-2`, `dall-e-3` | Deprecated legacy | Deprecation date in docs: support ends 2026-05-12 | Superseded by GPT Image models | `dall-e-2` is still the only variation endpoint model. |
++
++Docs caveat: some older OpenAI image guide/API reference pages and snippets still mention only `gpt-image-1.5`, `gpt-image-1`, and `gpt-image-1-mini`, or say GPT Image 1.5 is latest. The model page, pricing page, and 2026-04-21 changelog confirm `gpt-image-2` is current.
++
++## 2. **Capabilities matrix**
++
++| Capability | `gpt-image-2` | `gpt-image-1.5` | `gpt-image-1-mini` | `gpt-image-1` | DALL-E legacy |
++|---|---|---|---|---|---|
++| Generate endpoint | `/v1/images/generations` | Same | Same | Same | Same |
++| Edit/inpaint endpoint | `/v1/images/edits` | Same | Same | Same | `dall-e-2` edits; `dall-e-3` generations only |
++| Variation endpoint | No | No | No | No | `dall-e-2` only |
++| Response format | GPT Image models return `b64_json` by default; `url` unsupported | Same | Same | Same | `url` default; `b64_json` optional |
++| Output formats | `png`, `jpeg`, `webp` | Same | Same | Same | Legacy behavior differs; use GPT Image unless variation required |
++| Transparency / alpha | `background=transparent`, only with `png` or `webp` | Same | Same | Same | Not a GPT Image-style feature |
++| Prompt max length | 32,000 chars for GPT Image models | Same | Same | Same | `dall-e-2`: 1,000; `dall-e-3`: 4,000 |
++| Images per generation request | `n` 1-10 per API reference; verify current SDK behavior for `gpt-image-2` | Same documented range | Same documented range | Same documented range | `dall-e-3`: only `n=1` |
++| Edit input limits | Up to 16 images; each GPT Image input `png`, `webp`, or `jpg`, <50 MB | Same | Same | Same | `dall-e-2`: one square PNG <4 MB |
++| Input fidelity | Always high; `input_fidelity` cannot be changed | Supports fidelity control; docs note first 5 input images get higher preservation | Supports high fidelity; first image best preserved | Supports high fidelity; first image best preserved | Legacy |
++| Sizes | Flexible sizes; thousands of valid resolutions; examples include `1024x1024`, `1024x1536`, `1536x1024` | `1024x1024`, `1024x1536`, `1536x1024`, `auto` | Same | Same | Legacy sizes differ |
++| Quality tiers | `low`, `medium`, `high`, `auto` | Same | Same | Same | Legacy-specific |
++| Streaming partial images | Image API and Responses API support partial images; model pages say model "Streaming: Not supported", so treat streaming as endpoint/tool streaming, not model feature | Same caveat | Same caveat | Same caveat | Not primary path |
++| Content policy | Prompts and generated images filtered; `moderation=auto` or `low` for GPT Image models | Same | Same | Same | Filtered |
++| Latency | Docs: complex prompts may take up to 2 minutes | Same | Same | Same | Varies |
++
++Pricing shown below is output image cost for common sizes, excluding input text tokens and edit input image tokens. GPT Image models bill by tokens; total cost is input text + input images if editing + image output tokens.
++
++| Model | Quality | 1024x1024 | 1024x1536 | 1536x1024 |
++|---|---:|---:|---:|---:|
++| `gpt-image-2` | low | $0.006 | $0.005 | $0.005 |
++| `gpt-image-2` | medium | $0.053 | $0.041 | $0.041 |
++| `gpt-image-2` | high | $0.211 | $0.165 | $0.165 |
++| `gpt-image-1.5` | low | $0.009 | $0.013 | $0.013 |
++| `gpt-image-1.5` | medium | $0.034 | $0.050 | $0.050 |
++| `gpt-image-1.5` | high | $0.133 | $0.200 | $0.200 |
++| `gpt-image-1` | low | $0.011 | $0.016 | $0.016 |
++| `gpt-image-1` | medium | $0.042 | $0.063 | $0.063 |
++| `gpt-image-1` | high | $0.167 | $0.250 | $0.250 |
++| `gpt-image-1-mini` | low | $0.005 | $0.006 | $0.006 |
++| `gpt-image-1-mini` | medium | $0.011 | $0.015 | $0.015 |
++| `gpt-image-1-mini` | high | $0.036 | $0.052 | $0.052 |
++
++Token prices per 1M tokens:
++
++| Model | Text input | Text cached input | Text output | Image input | Image cached input | Image output |
++|---|---:|---:|---:|---:|---:|---:|
++| `gpt-image-2` | $5.00 | $1.25 | n/a | $8.00 | $2.00 | $30.00 |
++| `gpt-image-1.5` | $5.00 | $1.25 | $10.00 | $8.00 | $2.00 | $32.00 |
++| `gpt-image-1-mini` | $2.00 | $0.20 | n/a | $2.50 | $0.25 | $8.00 |
++| `gpt-image-1` | $5.00 | $1.25 | n/a | $10.00 | $2.50 | $40.00 |
++
++## 3. **API invocation — raw HTTP**
++
++Minimal generation request, returning base64 image data and saving it locally:
++
++```bash
++prompt='A crisp product photo of a matte black mechanical keyboard on a white desk'
++
++jq -n \
++  --arg model "gpt-image-2" \
++  --arg prompt "$prompt" \
++  '{
++    model: $model,
++    prompt: $prompt,
++    size: "1024x1024",
++    quality: "medium",
++    output_format: "png"
++  }' \
++| curl -sS -D /tmp/openai-img.headers \
++    -X POST "https://api.openai.com/v1/images/generations" \
++    -H "Authorization: Bearer $OPENAI_API_KEY" \
++    -H "Content-Type: application/json" \
++    --data-binary @- \
++| tee /tmp/openai-img.response.json \
++| jq -r '.data[0].b64_json' \
++| base64 --decode > ./image.png
++```
++
++Request JSON shape:
++
++```json
++{
++  "model": "gpt-image-2",
++  "prompt": "A crisp product photo of a matte black mechanical keyboard on a white desk",
++  "size": "1024x1024",
++  "quality": "medium",
++  "n": 1,
++  "output_format": "png",
++  "background": "opaque",
++  "moderation": "auto"
++}
++```
++
++For GPT Image models, expect `data[0].b64_json`; `data[0].url` is unsupported. For DALL-E legacy models, `url` may be returned. A defensive decoder:
++
++```bash
++if jq -e '.data[0].b64_json' response.json >/dev/null; then
++  jq -r '.data[0].b64_json' response.json | base64 --decode > image.png
++elif jq -e '.data[0].url' response.json >/dev/null; then
++  curl -L "$(jq -r '.data[0].url' response.json)" -o image.png
++else
++  jq . response.json >&2
++  exit 1
++fi
++```
++
++Transparent PNG:
++
++```json
++{
++  "model": "gpt-image-2",
++  "prompt": "A flat icon of a fountain pen, transparent background",
++  "size": "1024x1024",
++  "quality": "high",
++  "output_format": "png",
++  "background": "transparent"
++}
++```
++
++Common error modes:
++
++```json
++{
++  "error": {
++    "message": "Rate limit reached for images per minute.",
++    "type": "rate_limit_error",
++    "param": null,
++    "code": "rate_limit_exceeded"
++  }
++}
++```
++
++Handle with exponential backoff using `Retry-After`, `x-ratelimit-reset-requests`, or a bounded sleep. Avoid fan-out above the account's IPM limit.
++
++```json
++{
++  "error": {
++    "message": "Your request was rejected as a result of our safety system.",
++    "type": "invalid_request_error",
++    "param": "prompt",
++    "code": "content_policy_violation"
++  }
++}
++```
++
++Handle by recording the refusal, returning a clear message to the user, and optionally asking for a revised prompt. Do not blindly retry unchanged prompts after content-policy refusals.
++
++## 4. **API invocation — OpenAI Python/Node SDKs**
++
++Python one-shot:
++
++```python
++#!/usr/bin/env python3
++import base64
++from openai import OpenAI
++
++client = OpenAI()  # reads OPENAI_API_KEY
++
++result = client.images.generate(
++    model="gpt-image-2",
++    prompt="A crisp product photo of a matte black mechanical keyboard on a white desk",
++    size="1024x1024",
++    quality="medium",
++    output_format="png",
++    n=1,
++)
++
++with open("image.png", "wb") as f:
++    f.write(base64.b64decode(result.data[0].b64_json))
++```
++
++Node one-shot:
++
++```javascript
++#!/usr/bin/env node
++import fs from "node:fs";
++import OpenAI from "openai";
++
++const client = new OpenAI(); // reads OPENAI_API_KEY
++
++const result = await client.images.generate({
++  model: "gpt-image-2",
++  prompt: "A crisp product photo of a matte black mechanical keyboard on a white desk",
++  size: "1024x1024",
++  quality: "medium",
++  output_format: "png",
++  n: 1,
++});
++
++fs.writeFileSync("image.png", Buffer.from(result.data[0].b64_json, "base64"));
++```
++
++Responses API path, useful for multi-turn prompting but less direct for `/img`:
++
++```python
++import base64
++from openai import OpenAI
++
++client = OpenAI()
++response = client.responses.create(
++    model="gpt-5.5",
++    input="Generate an image of a matte black mechanical keyboard on a white desk",
++    tools=[{"type": "image_generation", "quality": "medium"}],
++    tool_choice={"type": "image_generation"},
++)
++
++images = [o.result for o in response.output if o.type == "image_generation_call"]
++with open("image.png", "wb") as f:
++    f.write(base64.b64decode(images[0]))
++```
++
++For a simple `/img <prompt>` skill, prefer the Images API. It is simpler, exposes image-specific parameters directly, and avoids an extra mainline model step.
++
++## 5. **Codex CLI integration paths**
++
++### Built-in image generation in Codex CLI 0.128.0
++
++I found no `codex` subcommand that directly generates images, and `codex mcp list` reports no configured MCP servers on this machine. `codex exec --help` exposes image inputs via `--image`, but not an image-output generation command.
++
++OpenAI's API docs describe an `image_generation` hosted tool in the Responses API. That is an API tool, not a `codex exec` command-line image generator. In Codex CLI 0.128.0, the practical path is to let the Codex agent run `curl` or a helper script that calls `/v1/images/generations`.
++
++### Recommended pattern
++
++| Pattern | Recommendation | Why |
++|---|---|---|
++| `curl` directly inside `codex exec` | Good for minimal proof-of-concept | No dependencies except `curl`, `jq`, `base64`; more shell quoting risk. |
++| Python helper invoked by Codex | Best default | Cleaner error handling, metadata capture, retries, path handling; SDK reads `OPENAI_API_KEY`. |
++| Node helper invoked by Codex | Good if downstream skill is JS-heavy | Same benefits as Python, but more npm dependency surface. |
++| Responses API image tool inside Codex | Use only for conversational/multi-turn image workflows | More moving parts and cost; not needed for one-shot `/img`. |
++| Codex built-in/MCP image tool | Not available by default in this verified CLI install | Could be added later via MCP/plugin, but do not assume it. |
++
++### `codex exec` invocation from an orchestrator
++
++Use a writable output directory and network access. In current local help, available sandbox modes are `read-only`, `workspace-write`, and `danger-full-access`; official docs also describe explicit sandbox selection for automation.
++
++Conservative version if output stays under the workspace and network is allowed by the environment/config:
++
++```bash
++mkdir -p ./artifacts/img/2026-05-06/run-001
++
++CODEX_API_KEY="${CODEX_API_KEY:-$OPENAI_API_KEY}" \
++codex exec \
++  --cd /home/fao/CXMem \
++  --sandbox workspace-write \
++  --ask-for-approval never \
++  --output-last-message ./artifacts/img/2026-05-06/run-001/codex-final.md \
++  'Generate one image using ./bin/img-gen.sh or curl. Prompt: "A crisp product photo of a matte black mechanical keyboard on a white desk". Save output under ./artifacts/img/2026-05-06/run-001 and report file paths only.'
++```
++
++If the parent process is already externally sandboxed and you need guaranteed network/filesystem access:
++
++```bash
++CODEX_API_KEY="${CODEX_API_KEY:-$OPENAI_API_KEY}" \
++codex exec \
++  --cd /home/fao/CXMem \
++  --sandbox danger-full-access \
++  --ask-for-approval never \
++  --output-last-message ./artifacts/img/2026-05-06/run-001/codex-final.md \
++  'Generate one image ...'
++```
++
++For machine-readable orchestration, add `--json` and parse JSONL events, or use `--output-schema` for a strict final result. `--output-last-message` writes the final message to a file and still prints it to stdout.
++
++### Auth behavior
++
++There are two separate auth concerns:
++
++1. The helper script/curl that calls the Images API should use `OPENAI_API_KEY` in the standard API way:
++
++```bash
++Authorization: Bearer $OPENAI_API_KEY
++```
++
++2. `codex exec` itself uses Codex CLI auth. Official Codex docs say `codex exec` reuses saved CLI authentication by default, and for CI/programmatic one-shot runs `CODEX_API_KEY` is supported only in `codex exec`:
++
++```bash
++CODEX_API_KEY="$OPENAI_API_KEY" codex exec --json "triage open bug reports"
++```
++
++Local verification on this machine:
++
++```text
++$ codex --version
++codex-cli 0.128.0
++
++$ codex login status
++Logged in using ChatGPT
++
++$ codex login --help
++--with-api-key  Read the API key from stdin
++```
++
++So, do not assume `codex exec` itself reads `OPENAI_API_KEY` directly. Use one of these:
++
++```bash
++# One-shot API-key auth for the Codex agent:
++CODEX_API_KEY="$OPENAI_API_KEY" codex exec ...
++
++# Or cache API-key auth in Codex:
++printenv OPENAI_API_KEY | codex login --with-api-key
++codex exec ...
++
++# Or use existing ChatGPT login:
++codex login
++codex exec ...
++```
++
++Inside the agent-run shell, ensure `OPENAI_API_KEY` reaches subprocesses. Codex has a `shell_environment_policy`; secrets may be filtered unless explicitly passed or configured. For image generation, the cleanest pattern is to have the parent invoke:
++
++```bash
++OPENAI_API_KEY="$OPENAI_API_KEY" CODEX_API_KEY="$OPENAI_API_KEY" codex exec ...
++```
++
++If a restrictive Codex config blocks secret inheritance, add a scoped config override only for this run:
++
++```bash
++codex exec \
++  -c 'shell_environment_policy.inherit="all"' \
++  ...
++```
++
++Use that carefully because it can expose more env vars to the agent's shell commands.
++
++## 6. **Reference helper script**
++
++Copy-paste as `bin/img-gen.sh`. This uses only `bash`, `curl`, `jq`, and `base64`; it does not require the Python or Node SDK.
++
++```bash
++#!/usr/bin/env bash
++set -euo pipefail
++
++model="gpt-image-2"
++size="1024x1024"
++quality="medium"
++n="1"
++format="png"
++background="auto"
++moderation="auto"
++prompt=""
++out=""
++
++usage() {
++  cat >&2 <<'USAGE'
++Usage:
++  img-gen.sh --prompt PROMPT --out OUT [--size SIZE] [--quality low|medium|high|auto] [--n N]
++
++Options:
++  --prompt       Text prompt. Required.
++  --out          Output file for n=1, or output directory/prefix for n>1. Required.
++  --size         Default: 1024x1024. For gpt-image-2, additional valid sizes exist.
++  --quality      Default: medium.
++  --n            Default: 1. Documented range: 1-10.
++  --model        Default: gpt-image-2.
++  --format       png|jpeg|webp. Default: png.
++  --background   auto|opaque|transparent. Default: auto.
++  --moderation   auto|low. Default: auto.
++USAGE
++}
++
++while [[ $# -gt 0 ]]; do
++  case "$1" in
++    --prompt) prompt="${2:-}"; shift 2 ;;
++    --out) out="${2:-}"; shift 2 ;;
++    --size) size="${2:-}"; shift 2 ;;
++    --quality) quality="${2:-}"; shift 2 ;;
++    --n) n="${2:-}"; shift 2 ;;
++    --model) model="${2:-}"; shift 2 ;;
++    --format) format="${2:-}"; shift 2 ;;
++    --background) background="${2:-}"; shift 2 ;;
++    --moderation) moderation="${2:-}"; shift 2 ;;
++    -h|--help) usage; exit 0 ;;
++    *) echo "Unknown argument: $1" >&2; usage; exit 2 ;;
++  esac
++done
++
++if [[ -z "$prompt" || -z "$out" ]]; then
++  usage
++  exit 2
++fi
++
++if [[ -z "${OPENAI_API_KEY:-}" ]]; then
++  echo "OPENAI_API_KEY is not set" >&2
++  exit 2
++fi
++
++tmpdir="$(mktemp -d)"
++trap 'rm -rf "$tmpdir"' EXIT
++
++request="$tmpdir/request.json"
++response="$tmpdir/response.json"
++headers="$tmpdir/headers.txt"
++
++jq -n \
++  --arg model "$model" \
++  --arg prompt "$prompt" \
++  --arg size "$size" \
++  --arg quality "$quality" \
++  --arg format "$format" \
++  --arg background "$background" \
++  --arg moderation "$moderation" \
++  --argjson n "$n" \
++  '{
++    model: $model,
++    prompt: $prompt,
++    size: $size,
++    quality: $quality,
++    n: $n,
++    output_format: $format,
++    background: $background,
++    moderation: $moderation
++  }' > "$request"
++
++http_code="$(
++  curl -sS \
++    -w '%{http_code}' \
++    -D "$headers" \
++    -o "$response" \
++    -X POST "https://api.openai.com/v1/images/generations" \
++    -H "Authorization: Bearer $OPENAI_API_KEY" \
++    -H "Content-Type: application/json" \
++    --data-binary @"$request"
++)"
++
++if [[ "$http_code" != 2* ]]; then
++  echo "OpenAI image request failed: HTTP $http_code" >&2
++  jq -r '.error | "type=\(.type // "unknown") code=\(.code // "unknown") message=\(.message // "no message")"' "$response" >&2 || cat "$response" >&2
++  echo "x-request-id: $(grep -i '^x-request-id:' "$headers" | awk '{print $2}' | tr -d '\r')" >&2
++  exit 1
++fi
++
++count="$(jq '.data | length' "$response")"
++mkdir -p "$(dirname "$out")"
++
++if [[ "$count" -eq 1 && "$n" -eq 1 ]]; then
++  jq -r '.data[0].b64_json' "$response" | base64 --decode > "$out"
++  meta="${out%.*}.json"
++  jq --arg output "$out" --arg request_id "$(grep -i '^x-request-id:' "$headers" | awk '{print $2}' | tr -d '\r')" \
++    '{created, background, output_format, quality, size, usage, output: $output, request_id: $request_id}' \
++    "$response" > "$meta"
++  printf '%s\n' "$out"
++else
++  mkdir -p "$out"
++  for i in $(seq 0 $((count - 1))); do
++    file="$out/image-$((i + 1)).$format"
++    jq -r ".data[$i].b64_json" "$response" | base64 --decode > "$file"
++    printf '%s\n' "$file"
++  done
++  jq --arg output_dir "$out" --arg request_id "$(grep -i '^x-request-id:' "$headers" | awk '{print $2}' | tr -d '\r')" \
++    '{created, background, output_format, quality, size, usage, output_dir: $output_dir, request_id: $request_id}' \
++    "$response" > "$out/metadata.json"
++fi
++```
++
++Example:
++
++```bash
++bin/img-gen.sh \
++  --prompt "A crisp product photo of a matte black mechanical keyboard on a white desk" \
++  --out ./artifacts/img/2026-05-06/run-001/image.png \
++  --size 1024x1024 \
++  --quality medium \
++  --n 1
++```
++
++## 7. **Skill-design implications for `/img`**
++
++Single-agent path:
++
++```bash
++run_id="$(date -u +%Y%m%dT%H%M%SZ)-$(openssl rand -hex 3)"
++out_dir="/home/fao/CXMem/artifacts/img/$run_id"
++mkdir -p "$out_dir"
++
++OPENAI_API_KEY="$OPENAI_API_KEY" CODEX_API_KEY="${CODEX_API_KEY:-$OPENAI_API_KEY}" \
++codex exec \
++  --cd /home/fao/CXMem \
++  --sandbox workspace-write \
++  --ask-for-approval never \
++  --output-last-message "$out_dir/codex-final.md" \
++  "Use bin/img-gen.sh to generate one image for this prompt: $PROMPT. Save it as $out_dir/image.png. Write metadata as $out_dir/metadata.json. Final answer must be JSON with output_path, metadata_path, model, size, quality."
++```
++
++Multi-agent path:
++
++```bash
++for i in 1 2 3 4; do
++  out_dir="/home/fao/CXMem/artifacts/img/$run_id/variant-$i"
++  mkdir -p "$out_dir"
++  (
++    style_hint="$(jq -r ".[$((i-1))]" styles.json)"
++    OPENAI_API_KEY="$OPENAI_API_KEY" CODEX_API_KEY="${CODEX_API_KEY:-$OPENAI_API_KEY}" \
++    codex exec \
++      --cd /home/fao/CXMem \
++      --sandbox workspace-write \
++      --ask-for-approval never \
++      --output-last-message "$out_dir/codex-final.md" \
++      "Generate one image with style hint '$style_hint'. Prompt: $PROMPT. Save image and metadata under $out_dir."
++  ) &
++done
++wait
++```
++
++Suggested output convention:
++
++```text
++artifacts/img/
++  20260506T231500Z-a1b2c3/
++    manifest.json
++    prompt.txt
++    variant-1/
++      image.png
++      metadata.json
++      codex-final.md
++      response.json
++    variant-2/
++      image.png
++      metadata.json
++      codex-final.md
++```
++
++Record metadata beside every image:
++
++```json
++{
++  "prompt_original": "...",
++  "prompt_effective": "...",
++  "model": "gpt-image-2",
++  "size": "1024x1024",
++  "quality": "medium",
++  "n": 1,
++  "output_format": "png",
++  "background": "auto",
++  "moderation": "auto",
++  "created_at": "2026-05-06T23:15:00Z",
++  "request_id": "req_...",
++  "usage": {
++    "input_tokens": 0,
++    "output_tokens": 0,
++    "total_tokens": 0
++  },
++  "estimated_cost_usd": 0.053,
++  "codex": {
++    "version": "0.128.0",
++    "sandbox": "workspace-write",
++    "auth_mode": "CODEX_API_KEY or cached ChatGPT"
++  },
++  "source_files": []
++}
++```
++
++Failure handling:
++
++| Failure | Handling |
++|---|---|
++| Rate limit / 429 | Retry with exponential backoff and jitter; honor `Retry-After` or rate-limit reset headers; cap retries at 3-5. |
++| Transient 5xx / network | Retry with backoff; preserve failed response and request ID. |
++| Content policy refusal | Do not retry unchanged; record refusal and return a prompt-revision request. |
++| Missing `OPENAI_API_KEY` | Fail before dispatching Codex agents. |
++| Codex auth missing | Use `CODEX_API_KEY="$OPENAI_API_KEY"` for exec, or run `printenv OPENAI_API_KEY \| codex login --with-api-key`. |
++| Partial multi-agent failure | Keep successful variants; write a top-level manifest listing failed variants and reasons. |
++
++## 8. **Open questions / risks**
++
++1. `gpt-image-2` supports flexible sizes, but the docs do not expose a complete machine-readable list of valid width/height constraints in the pages consulted. The skill should validate common sizes locally and pass through custom sizes only after empirical testing.
++2. The API reference enum page consulted still omits `gpt-image-2` in one model enum section while the model page, changelog, pricing, and guide confirm it. Treat this as stale reference generation.
++3. Streaming docs and model pages are semantically inconsistent: guides show endpoint/tool partial-image streaming, while model pages say model streaming is not supported. For `/img`, avoid streaming unless user experience requires it.
++4. `n=1..10` is documented for image generation, but parallel single-image requests are often easier to isolate and retry than one `n>1` request. Test account-specific IPM and latency before choosing the default.
++5. `CODEX_API_KEY` is documented as `codex exec`-only. `OPENAI_API_KEY` remains the standard SDK/curl variable. The orchestrator should set both when launching Codex workers.
++6. Codex shell environment filtering can suppress secrets. A downstream skill must test whether `OPENAI_API_KEY` reaches the agent's shell under Hao's actual `~/.codex/config.toml`.
++7. Costs can differ from the table for `gpt-image-2` custom sizes. Use returned `usage` plus pricing tables for post-hoc accounting.
++
++## 9. **Source list**
++
++| URL | What it confirmed |
++|---|---|
++| https://developers.openai.com/api/docs/changelog | `gpt-image-2` released 2026-04-21; `gpt-image-1.5` released 2025-12-16; `gpt-image-1-mini` released 2025-10-06; Batch/API updates. |
++| https://developers.openai.com/api/docs/models/gpt-image-2 | Current `gpt-image-2` model page, snapshot `gpt-image-2-2026-04-21`, endpoints, rate limits, state-of-the-art description. |
++| https://developers.openai.com/api/docs/guides/image-generation | Generation/edit examples, GPT Image parameters, moderation, transparency, latency, flexible sizes, pricing calculator table. |
++| https://developers.openai.com/api/docs/pricing | Token prices for `gpt-image-2`, `gpt-image-1.5`, and `gpt-image-1-mini`; Batch discount. |
++| https://developers.openai.com/api/docs/models/gpt-image-1.5 | `gpt-image-1.5` pricing, snapshot, endpoints, previous-model status. |
++| https://developers.openai.com/api/docs/models/gpt-image-1-mini | `gpt-image-1-mini` cost-efficient status, pricing, endpoints. |
++| https://developers.openai.com/api/docs/models/gpt-image-1 | `gpt-image-1` previous/deprecated status, pricing, endpoints. |
++| https://developers.openai.com/api/reference/resources/images | Image API response fields, b64 vs url behavior, prompt length, n range, edit limits; noted stale enum inconsistency around `gpt-image-2`. |
++| https://openai.com/index/new-chatgpt-images-is-here/ | Public release context for ChatGPT Images / GPT Image 1.5 and product naming. |
++| https://deploymentsafety.openai.com/chatgpt-images-2-0/chatgpt-images-2-0.pdf | Confirms "ChatGPT Images 2.0" product/system-card naming, distinct from the API model ID `gpt-image-2`. |
++| https://developers.openai.com/codex/auth | Codex auth methods, ChatGPT vs API key, local credential cache, headless/device auth, credential storage. |
++| https://developers.openai.com/codex/noninteractive | `codex exec` automation behavior, sandbox guidance, `--json`, `--output-last-message`, and `CODEX_API_KEY` for CI/programmatic runs. |
++| https://developers.openai.com/codex/config-basic | Codex config file precedence and user/project config locations. |
++| https://developers.openai.com/codex/config-advanced | Shell environment policy and sandbox/network configuration details. |
++| https://developers.openai.com/codex/config-reference | MCP configuration and environment variable forwarding details. |
++| https://github.com/openai/codex/blob/main/docs/authentication.md | Official repo points auth docs to developers.openai.com. |
++| https://www.mintlify.com/openai/codex/cli/exec | Unofficial generated CLI reference used only as a secondary cross-check for `codex exec` flags. |
++
+
+exec
+/bin/bash -lc 'wc -l /home/fao/CXMem/notes/research/codex-image-gen.md' in /home/fao/CXMem
+ succeeded in 0ms:
+611 /home/fao/CXMem/notes/research/codex-image-gen.md
+
+exec
+/bin/bash -lc 'rg -n "''^## [1-9]'"\\.\" /home/fao/CXMem/notes/research/codex-image-gen.md" in /home/fao/CXMem
+ succeeded in 0ms:
+5:## 1. **Model landscape (verified 2026-05)**
+24:## 2. **Capabilities matrix**
+70:## 3. **API invocation — raw HTTP**
+166:## 4. **API invocation — OpenAI Python/Node SDKs**
+232:## 5. **Codex CLI integration paths**
+342:## 6. **Reference helper script**
+483:## 7. **Skill-design implications for `/img`**
+580:## 8. **Open questions / risks**
+590:## 9. **Source list**
+
+exec
+/bin/bash -lc "rg -n \"gpt-image-2\\.0|gpt-image-2|CODEX_API_KEY|OPENAI_API_KEY|Source list\" /home/fao/CXMem/notes/research/codex-image-gen.md" in /home/fao/CXMem
+ succeeded in 0ms:
+7:OpenAI's current API image-generation family is GPT Image. The real latest API model ID is `gpt-image-2`, released April 21, 2026. It is the current state-of-the-art image generation/editing model and supports flexible image sizes, high-fidelity image inputs, token-based image pricing, and Batch API support.
+9:There is no verified API model ID named `gpt-image-2.0`. Hao's "gpt image 2.0" maps to the product/system-card naming "ChatGPT Images 2.0" and to the API model ID `gpt-image-2`, not `gpt-image-2.0`.
+15:| `gpt-image-2` | Latest | Released 2026-04-21; snapshot `gpt-image-2-2026-04-21` | Supersedes `gpt-image-1.5` for best quality/capability | Fast, high-quality generation and editing; flexible image sizes; high-fidelity inputs. |
+18:| `gpt-image-1` | Deprecated / previous | Original GPT Image API model | Superseded by `gpt-image-1.5`, then `gpt-image-2` | Model page marks it deprecated. |
+22:Docs caveat: some older OpenAI image guide/API reference pages and snippets still mention only `gpt-image-1.5`, `gpt-image-1`, and `gpt-image-1-mini`, or say GPT Image 1.5 is latest. The model page, pricing page, and 2026-04-21 changelog confirm `gpt-image-2` is current.
+26:| Capability | `gpt-image-2` | `gpt-image-1.5` | `gpt-image-1-mini` | `gpt-image-1` | DALL-E legacy |
+35:| Images per generation request | `n` 1-10 per API reference; verify current SDK behavior for `gpt-image-2` | Same documented range | Same documented range | Same documented range | `dall-e-3`: only `n=1` |
+48:| `gpt-image-2` | low | $0.006 | $0.005 | $0.005 |
+49:| `gpt-image-2` | medium | $0.053 | $0.041 | $0.041 |
+50:| `gpt-image-2` | high | $0.211 | $0.165 | $0.165 |
+65:| `gpt-image-2` | $5.00 | $1.25 | n/a | $8.00 | $2.00 | $30.00 |
+78:  --arg model "gpt-image-2" \
+89:    -H "Authorization: Bearer $OPENAI_API_KEY" \
+101:  "model": "gpt-image-2",
+129:  "model": "gpt-image-2",
+175:client = OpenAI()  # reads OPENAI_API_KEY
+178:    model="gpt-image-2",
+197:const client = new OpenAI(); // reads OPENAI_API_KEY
+200:  model: "gpt-image-2",
+245:| Python helper invoked by Codex | Best default | Cleaner error handling, metadata capture, retries, path handling; SDK reads `OPENAI_API_KEY`. |
+259:CODEX_API_KEY="${CODEX_API_KEY:-$OPENAI_API_KEY}" \
+271:CODEX_API_KEY="${CODEX_API_KEY:-$OPENAI_API_KEY}" \
+286:1. The helper script/curl that calls the Images API should use `OPENAI_API_KEY` in the standard API way:
+289:Authorization: Bearer $OPENAI_API_KEY
+292:2. `codex exec` itself uses Codex CLI auth. Official Codex docs say `codex exec` reuses saved CLI authentication by default, and for CI/programmatic one-shot runs `CODEX_API_KEY` is supported only in `codex exec`:
+295:CODEX_API_KEY="$OPENAI_API_KEY" codex exec --json "triage open bug reports"
+311:So, do not assume `codex exec` itself reads `OPENAI_API_KEY` directly. Use one of these:
+315:CODEX_API_KEY="$OPENAI_API_KEY" codex exec ...
+318:printenv OPENAI_API_KEY | codex login --with-api-key
+326:Inside the agent-run shell, ensure `OPENAI_API_KEY` reaches subprocesses. Codex has a `shell_environment_policy`; secrets may be filtered unless explicitly passed or configured. For image generation, the cleanest pattern is to have the parent invoke:
+329:OPENAI_API_KEY="$OPENAI_API_KEY" CODEX_API_KEY="$OPENAI_API_KEY" codex exec ...
+350:model="gpt-image-2"
+368:  --size         Default: 1024x1024. For gpt-image-2, additional valid sizes exist.
+371:  --model        Default: gpt-image-2.
+399:if [[ -z "${OPENAI_API_KEY:-}" ]]; then
+400:  echo "OPENAI_API_KEY is not set" >&2
+437:    -H "Authorization: Bearer $OPENAI_API_KEY" \
+492:OPENAI_API_KEY="$OPENAI_API_KEY" CODEX_API_KEY="${CODEX_API_KEY:-$OPENAI_API_KEY}" \
+509:    OPENAI_API_KEY="$OPENAI_API_KEY" CODEX_API_KEY="${CODEX_API_KEY:-$OPENAI_API_KEY}" \
+545:  "model": "gpt-image-2",
+563:    "auth_mode": "CODEX_API_KEY or cached ChatGPT"
+576:| Missing `OPENAI_API_KEY` | Fail before dispatching Codex agents. |
+577:| Codex auth missing | Use `CODEX_API_KEY="$OPENAI_API_KEY"` for exec, or run `printenv OPENAI_API_KEY \| codex login --with-api-key`. |
+582:1. `gpt-image-2` supports flexible sizes, but the docs do not expose a complete machine-readable list of valid width/height constraints in the pages consulted. The skill should validate common sizes locally and pass through custom sizes only after empirical testing.
+583:2. The API reference enum page consulted still omits `gpt-image-2` in one model enum section while the model page, changelog, pricing, and guide confirm it. Treat this as stale reference generation.
+586:5. `CODEX_API_KEY` is documented as `codex exec`-only. `OPENAI_API_KEY` remains the standard SDK/curl variable. The orchestrator should set both when launching Codex workers.
+587:6. Codex shell environment filtering can suppress secrets. A downstream skill must test whether `OPENAI_API_KEY` reaches the agent's shell under Hao's actual `~/.codex/config.toml`.
+588:7. Costs can differ from the table for `gpt-image-2` custom sizes. Use returned `usage` plus pricing tables for post-hoc accounting.
+590:## 9. **Source list**
+594:| https://developers.openai.com/api/docs/changelog | `gpt-image-2` released 2026-04-21; `gpt-image-1.5` released 2025-12-16; `gpt-image-1-mini` released 2025-10-06; Batch/API updates. |
+595:| https://developers.openai.com/api/docs/models/gpt-image-2 | Current `gpt-image-2` model page, snapshot `gpt-image-2-2026-04-21`, endpoints, rate limits, state-of-the-art description. |
+597:| https://developers.openai.com/api/docs/pricing | Token prices for `gpt-image-2`, `gpt-image-1.5`, and `gpt-image-1-mini`; Batch discount. |
+601:| https://developers.openai.com/api/reference/resources/images | Image API response fields, b64 vs url behavior, prompt length, n range, edit limits; noted stale enum inconsistency around `gpt-image-2`. |
+603:| https://deploymentsafety.openai.com/chatgpt-images-2-0/chatgpt-images-2-0.pdf | Confirms "ChatGPT Images 2.0" product/system-card naming, distinct from the API model ID `gpt-image-2`. |
+605:| https://developers.openai.com/codex/noninteractive | `codex exec` automation behavior, sandbox guidance, `--json`, `--output-last-message`, and `CODEX_API_KEY` for CI/programmatic runs. |
+
+diff --git a/notes/research/codex-image-gen.md b/notes/research/codex-image-gen.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..b6ef42735d8e90e20fdf3185664944177449c14f
+--- /dev/null
++++ b/notes/research/codex-image-gen.md
+@@ -0,0 +1,611 @@
++# Programmatic OpenAI Image Generation from Codex CLI
++
++Research date: 2026-05-06
++
++## 1. **Model landscape (verified 2026-05)**
++
++OpenAI's current API image-generation family is GPT Image. The real latest API model ID is `gpt-image-2`, released April 21, 2026. It is the current state-of-the-art image generation/editing model and supports flexible image sizes, high-fidelity image inputs, token-based image pricing, and Batch API support.
++
++There is no verified API model ID named `gpt-image-2.0`. Hao's "gpt image 2.0" maps to the product/system-card naming "ChatGPT Images 2.0" and to the API model ID `gpt-image-2`, not `gpt-image-2.0`.
++
++Current lineup:
++
++| Model ID | Status | Release / snapshot | What it supersedes | Notes |
++|---|---:|---:|---|---|
++| `gpt-image-2` | Latest | Released 2026-04-21; snapshot `gpt-image-2-2026-04-21` | Supersedes `gpt-image-1.5` for best quality/capability | Fast, high-quality generation and editing; flexible image sizes; high-fidelity inputs. |
++| `gpt-image-1.5` | Previous | Released 2025-12-16; snapshot `gpt-image-1.5-2025-12-16` | Superseded `gpt-image-1` | Stronger prompt adherence than `gpt-image-1`; still supported. |
++| `gpt-image-1-mini` | Cost-efficient | Released 2025-10-06 | Lower-cost alternative to GPT Image 1 family | Cheapest current GPT Image option. |
++| `gpt-image-1` | Deprecated / previous | Original GPT Image API model | Superseded by `gpt-image-1.5`, then `gpt-image-2` | Model page marks it deprecated. |
++| `chatgpt-image-latest` | ChatGPT image alias | Released 2025-12-16 with GPT Image 1.5 | Alias for model used in ChatGPT Images | Useful only if you deliberately want ChatGPT-aligned behavior; docs emphasize API model IDs above. |
++| `dall-e-2`, `dall-e-3` | Deprecated legacy | Deprecation date in docs: support ends 2026-05-12 | Superseded by GPT Image models | `dall-e-2` is still the only variation endpoint model. |
++
++Docs caveat: some older OpenAI image guide/API reference pages and snippets still mention only `gpt-image-1.5`, `gpt-image-1`, and `gpt-image-1-mini`, or say GPT Image 1.5 is latest. The model page, pricing page, and 2026-04-21 changelog confirm `gpt-image-2` is current.
++
++## 2. **Capabilities matrix**
++
++| Capability | `gpt-image-2` | `gpt-image-1.5` | `gpt-image-1-mini` | `gpt-image-1` | DALL-E legacy |
++|---|---|---|---|---|---|
++| Generate endpoint | `/v1/images/generations` | Same | Same | Same | Same |
++| Edit/inpaint endpoint | `/v1/images/edits` | Same | Same | Same | `dall-e-2` edits; `dall-e-3` generations only |
++| Variation endpoint | No | No | No | No | `dall-e-2` only |
++| Response format | GPT Image models return `b64_json` by default; `url` unsupported | Same | Same | Same | `url` default; `b64_json` optional |
++| Output formats | `png`, `jpeg`, `webp` | Same | Same | Same | Legacy behavior differs; use GPT Image unless variation required |
++| Transparency / alpha | `background=transparent`, only with `png` or `webp` | Same | Same | Same | Not a GPT Image-style feature |
++| Prompt max length | 32,000 chars for GPT Image models | Same | Same | Same | `dall-e-2`: 1,000; `dall-e-3`: 4,000 |
++| Images per generation request | `n` 1-10 per API reference; verify current SDK behavior for `gpt-image-2` | Same documented range | Same documented range | Same documented range | `dall-e-3`: only `n=1` |
++| Edit input limits | Up to 16 images; each GPT Image input `png`, `webp`, or `jpg`, <50 MB | Same | Same | Same | `dall-e-2`: one square PNG <4 MB |
++| Input fidelity | Always high; `input_fidelity` cannot be changed | Supports fidelity control; docs note first 5 input images get higher preservation | Supports high fidelity; first image best preserved | Supports high fidelity; first image best preserved | Legacy |
++| Sizes | Flexible sizes; thousands of valid resolutions; examples include `1024x1024`, `1024x1536`, `1536x1024` | `1024x1024`, `1024x1536`, `1536x1024`, `auto` | Same | Same | Legacy sizes differ |
++| Quality tiers | `low`, `medium`, `high`, `auto` | Same | Same | Same | Legacy-specific |
++| Streaming partial images | Image API and Responses API support partial images; model pages say model "Streaming: Not supported", so treat streaming as endpoint/tool streaming, not model feature | Same caveat | Same caveat | Same caveat | Not primary path |
++| Content policy | Prompts and generated images filtered; `moderation=auto` or `low` for GPT Image models | Same | Same | Same | Filtered |
++| Latency | Docs: complex prompts may take up to 2 minutes | Same | Same | Same | Varies |
++
++Pricing shown below is output image cost for common sizes, excluding input text tokens and edit input image tokens. GPT Image models bill by tokens; total cost is input text + input images if editing + image output tokens.
++
++| Model | Quality | 1024x1024 | 1024x1536 | 1536x1024 |
++|---|---:|---:|---:|---:|
++| `gpt-image-2` | low | $0.006 | $0.005 | $0.005 |
++| `gpt-image-2` | medium | $0.053 | $0.041 | $0.041 |
++| `gpt-image-2` | high | $0.211 | $0.165 | $0.165 |
++| `gpt-image-1.5` | low | $0.009 | $0.013 | $0.013 |
++| `gpt-image-1.5` | medium | $0.034 | $0.050 | $0.050 |
++| `gpt-image-1.5` | high | $0.133 | $0.200 | $0.200 |
++| `gpt-image-1` | low | $0.011 | $0.016 | $0.016 |
++| `gpt-image-1` | medium | $0.042 | $0.063 | $0.063 |
++| `gpt-image-1` | high | $0.167 | $0.250 | $0.250 |
++| `gpt-image-1-mini` | low | $0.005 | $0.006 | $0.006 |
++| `gpt-image-1-mini` | medium | $0.011 | $0.015 | $0.015 |
++| `gpt-image-1-mini` | high | $0.036 | $0.052 | $0.052 |
++
++Token prices per 1M tokens:
++
++| Model | Text input | Text cached input | Text output | Image input | Image cached input | Image output |
++|---|---:|---:|---:|---:|---:|---:|
++| `gpt-image-2` | $5.00 | $1.25 | n/a | $8.00 | $2.00 | $30.00 |
++| `gpt-image-1.5` | $5.00 | $1.25 | $10.00 | $8.00 | $2.00 | $32.00 |
++| `gpt-image-1-mini` | $2.00 | $0.20 | n/a | $2.50 | $0.25 | $8.00 |
++| `gpt-image-1` | $5.00 | $1.25 | n/a | $10.00 | $2.50 | $40.00 |
++
++## 3. **API invocation — raw HTTP**
++
++Minimal generation request, returning base64 image data and saving it locally:
++
++```bash
++prompt='A crisp product photo of a matte black mechanical keyboard on a white desk'
++
++jq -n \
++  --arg model "gpt-image-2" \
++  --arg prompt "$prompt" \
++  '{
++    model: $model,
++    prompt: $prompt,
++    size: "1024x1024",
++    quality: "medium",
++    output_format: "png"
++  }' \
++| curl -sS -D /tmp/openai-img.headers \
++    -X POST "https://api.openai.com/v1/images/generations" \
++    -H "Authorization: Bearer $OPENAI_API_KEY" \
++    -H "Content-Type: application/json" \
++    --data-binary @- \
++| tee /tmp/openai-img.response.json \
++| jq -r '.data[0].b64_json' \
++| base64 --decode > ./image.png
++```
++
++Request JSON shape:
++
++```json
++{
++  "model": "gpt-image-2",
++  "prompt": "A crisp product photo of a matte black mechanical keyboard on a white desk",
++  "size": "1024x1024",
++  "quality": "medium",
++  "n": 1,
++  "output_format": "png",
++  "background": "opaque",
++  "moderation": "auto"
++}
++```
++
++For GPT Image models, expect `data[0].b64_json`; `data[0].url` is unsupported. For DALL-E legacy models, `url` may be returned. A defensive decoder:
++
++```bash
++if jq -e '.data[0].b64_json' response.json >/dev/null; then
++  jq -r '.data[0].b64_json' response.json | base64 --decode > image.png
++elif jq -e '.data[0].url' response.json >/dev/null; then
++  curl -L "$(jq -r '.data[0].url' response.json)" -o image.png
++else
++  jq . response.json >&2
++  exit 1
++fi
++```
++
++Transparent PNG:
++
++```json
++{
++  "model": "gpt-image-2",
++  "prompt": "A flat icon of a fountain pen, transparent background",
++  "size": "1024x1024",
++  "quality": "high",
++  "output_format": "png",
++  "background": "transparent"
++}
++```
++
++Common error modes:
++
++```json
++{
++  "error": {
++    "message": "Rate limit reached for images per minute.",
++    "type": "rate_limit_error",
++    "param": null,
++    "code": "rate_limit_exceeded"
++  }
++}
++```
++
++Handle with exponential backoff using `Retry-After`, `x-ratelimit-reset-requests`, or a bounded sleep. Avoid fan-out above the account's IPM limit.
++
++```json
++{
++  "error": {
++    "message": "Your request was rejected as a result of our safety system.",
++    "type": "invalid_request_error",
++    "param": "prompt",
++    "code": "content_policy_violation"
++  }
++}
++```
++
++Handle by recording the refusal, returning a clear message to the user, and optionally asking for a revised prompt. Do not blindly retry unchanged prompts after content-policy refusals.
++
++## 4. **API invocation — OpenAI Python/Node SDKs**
++
++Python one-shot:
++
++```python
++#!/usr/bin/env python3
++import base64
++from openai import OpenAI
++
++client = OpenAI()  # reads OPENAI_API_KEY
++
++result = client.images.generate(
++    model="gpt-image-2",
++    prompt="A crisp product photo of a matte black mechanical keyboard on a white desk",
++    size="1024x1024",
++    quality="medium",
++    output_format="png",
++    n=1,
++)
++
++with open("image.png", "wb") as f:
++    f.write(base64.b64decode(result.data[0].b64_json))
++```
++
++Node one-shot:
++
++```javascript
++#!/usr/bin/env node
++import fs from "node:fs";
++import OpenAI from "openai";
++
++const client = new OpenAI(); // reads OPENAI_API_KEY
++
++const result = await client.images.generate({
++  model: "gpt-image-2",
++  prompt: "A crisp product photo of a matte black mechanical keyboard on a white desk",
++  size: "1024x1024",
++  quality: "medium",
++  output_format: "png",
++  n: 1,
++});
++
++fs.writeFileSync("image.png", Buffer.from(result.data[0].b64_json, "base64"));
++```
++
++Responses API path, useful for multi-turn prompting but less direct for `/img`:
++
++```python
++import base64
++from openai import OpenAI
++
++client = OpenAI()
++response = client.responses.create(
++    model="gpt-5.5",
++    input="Generate an image of a matte black mechanical keyboard on a white desk",
++    tools=[{"type": "image_generation", "quality": "medium"}],
++    tool_choice={"type": "image_generation"},
++)
++
++images = [o.result for o in response.output if o.type == "image_generation_call"]
++with open("image.png", "wb") as f:
++    f.write(base64.b64decode(images[0]))
++```
++
++For a simple `/img <prompt>` skill, prefer the Images API. It is simpler, exposes image-specific parameters directly, and avoids an extra mainline model step.
++
++## 5. **Codex CLI integration paths**
++
++### Built-in image generation in Codex CLI 0.128.0
++
++I found no `codex` subcommand that directly generates images, and `codex mcp list` reports no configured MCP servers on this machine. `codex exec --help` exposes image inputs via `--image`, but not an image-output generation command.
++
++OpenAI's API docs describe an `image_generation` hosted tool in the Responses API. That is an API tool, not a `codex exec` command-line image generator. In Codex CLI 0.128.0, the practical path is to let the Codex agent run `curl` or a helper script that calls `/v1/images/generations`.
++
++### Recommended pattern
++
++| Pattern | Recommendation | Why |
++|---|---|---|
++| `curl` directly inside `codex exec` | Good for minimal proof-of-concept | No dependencies except `curl`, `jq`, `base64`; more shell quoting risk. |
++| Python helper invoked by Codex | Best default | Cleaner error handling, metadata capture, retries, path handling; SDK reads `OPENAI_API_KEY`. |
++| Node helper invoked by Codex | Good if downstream skill is JS-heavy | Same benefits as Python, but more npm dependency surface. |
++| Responses API image tool inside Codex | Use only for conversational/multi-turn image workflows | More moving parts and cost; not needed for one-shot `/img`. |
++| Codex built-in/MCP image tool | Not available by default in this verified CLI install | Could be added later via MCP/plugin, but do not assume it. |
++
++### `codex exec` invocation from an orchestrator
++
++Use a writable output directory and network access. In current local help, available sandbox modes are `read-only`, `workspace-write`, and `danger-full-access`; official docs also describe explicit sandbox selection for automation.
++
++Conservative version if output stays under the workspace and network is allowed by the environment/config:
++
++```bash
++mkdir -p ./artifacts/img/2026-05-06/run-001
++
++CODEX_API_KEY="${CODEX_API_KEY:-$OPENAI_API_KEY}" \
++codex exec \
++  --cd /home/fao/CXMem \
++  --sandbox workspace-write \
++  --ask-for-approval never \
++  --output-last-message ./artifacts/img/2026-05-06/run-001/codex-final.md \
++  'Generate one image using ./bin/img-gen.sh or curl. Prompt: "A crisp product photo of a matte black mechanical keyboard on a white desk". Save output under ./artifacts/img/2026-05-06/run-001 and report file paths only.'
++```
++
++If the parent process is already externally sandboxed and you need guaranteed network/filesystem access:
++
++```bash
++CODEX_API_KEY="${CODEX_API_KEY:-$OPENAI_API_KEY}" \
++codex exec \
++  --cd /home/fao/CXMem \
++  --sandbox danger-full-access \
++  --ask-for-approval never \
++  --output-last-message ./artifacts/img/2026-05-06/run-001/codex-final.md \
++  'Generate one image ...'
++```
++
++For machine-readable orchestration, add `--json` and parse JSONL events, or use `--output-schema` for a strict final result. `--output-last-message` writes the final message to a file and still prints it to stdout.
++
++### Auth behavior
++
++There are two separate auth concerns:
++
++1. The helper script/curl that calls the Images API should use `OPENAI_API_KEY` in the standard API way:
++
++```bash
++Authorization: Bearer $OPENAI_API_KEY
++```
++
++2. `codex exec` itself uses Codex CLI auth. Official Codex docs say `codex exec` reuses saved CLI authentication by default, and for CI/programmatic one-shot runs `CODEX_API_KEY` is supported only in `codex exec`:
++
++```bash
++CODEX_API_KEY="$OPENAI_API_KEY" codex exec --json "triage open bug reports"
++```
++
++Local verification on this machine:
++
++```text
++$ codex --version
++codex-cli 0.128.0
++
++$ codex login status
++Logged in using ChatGPT
++
++$ codex login --help
++--with-api-key  Read the API key from stdin
++```
++
++So, do not assume `codex exec` itself reads `OPENAI_API_KEY` directly. Use one of these:
++
++```bash
++# One-shot API-key auth for the Codex agent:
++CODEX_API_KEY="$OPENAI_API_KEY" codex exec ...
++
++# Or cache API-key auth in Codex:
++printenv OPENAI_API_KEY | codex login --with-api-key
++codex exec ...
++
++# Or use existing ChatGPT login:
++codex login
++codex exec ...
++```
++
++Inside the agent-run shell, ensure `OPENAI_API_KEY` reaches subprocesses. Codex has a `shell_environment_policy`; secrets may be filtered unless explicitly passed or configured. For image generation, the cleanest pattern is to have the parent invoke:
++
++```bash
++OPENAI_API_KEY="$OPENAI_API_KEY" CODEX_API_KEY="$OPENAI_API_KEY" codex exec ...
++```
++
++If a restrictive Codex config blocks secret inheritance, add a scoped config override only for this run:
++
++```bash
++codex exec \
++  -c 'shell_environment_policy.inherit="all"' \
++  ...
++```
++
++Use that carefully because it can expose more env vars to the agent's shell commands.
++
++## 6. **Reference helper script**
++
++Copy-paste as `bin/img-gen.sh`. This uses only `bash`, `curl`, `jq`, and `base64`; it does not require the Python or Node SDK.
++
++```bash
++#!/usr/bin/env bash
++set -euo pipefail
++
++model="gpt-image-2"
++size="1024x1024"
++quality="medium"
++n="1"
++format="png"
++background="auto"
++moderation="auto"
++prompt=""
++out=""
++
++usage() {
++  cat >&2 <<'USAGE'
++Usage:
++  img-gen.sh --prompt PROMPT --out OUT [--size SIZE] [--quality low|medium|high|auto] [--n N]
++
++Options:
++  --prompt       Text prompt. Required.
++  --out          Output file for n=1, or output directory/prefix for n>1. Required.
++  --size         Default: 1024x1024. For gpt-image-2, additional valid sizes exist.
++  --quality      Default: medium.
++  --n            Default: 1. Documented range: 1-10.
++  --model        Default: gpt-image-2.
++  --format       png|jpeg|webp. Default: png.
++  --background   auto|opaque|transparent. Default: auto.
++  --moderation   auto|low. Default: auto.
++USAGE
++}
++
++while [[ $# -gt 0 ]]; do
++  case "$1" in
++    --prompt) prompt="${2:-}"; shift 2 ;;
++    --out) out="${2:-}"; shift 2 ;;
++    --size) size="${2:-}"; shift 2 ;;
++    --quality) quality="${2:-}"; shift 2 ;;
++    --n) n="${2:-}"; shift 2 ;;
++    --model) model="${2:-}"; shift 2 ;;
++    --format) format="${2:-}"; shift 2 ;;
++    --background) background="${2:-}"; shift 2 ;;
++    --moderation) moderation="${2:-}"; shift 2 ;;
++    -h|--help) usage; exit 0 ;;
++    *) echo "Unknown argument: $1" >&2; usage; exit 2 ;;
++  esac
++done
++
++if [[ -z "$prompt" || -z "$out" ]]; then
++  usage
++  exit 2
++fi
++
++if [[ -z "${OPENAI_API_KEY:-}" ]]; then
++  echo "OPENAI_API_KEY is not set" >&2
++  exit 2
++fi
++
++tmpdir="$(mktemp -d)"
++trap 'rm -rf "$tmpdir"' EXIT
++
++request="$tmpdir/request.json"
++response="$tmpdir/response.json"
++headers="$tmpdir/headers.txt"
++
++jq -n \
++  --arg model "$model" \
++  --arg prompt "$prompt" \
++  --arg size "$size" \
++  --arg quality "$quality" \
++  --arg format "$format" \
++  --arg background "$background" \
++  --arg moderation "$moderation" \
++  --argjson n "$n" \
++  '{
++    model: $model,
++    prompt: $prompt,
++    size: $size,
++    quality: $quality,
++    n: $n,
++    output_format: $format,
++    background: $background,
++    moderation: $moderation
++  }' > "$request"
++
++http_code="$(
++  curl -sS \
++    -w '%{http_code}' \
++    -D "$headers" \
++    -o "$response" \
++    -X POST "https://api.openai.com/v1/images/generations" \
++    -H "Authorization: Bearer $OPENAI_API_KEY" \
++    -H "Content-Type: application/json" \
++    --data-binary @"$request"
++)"
++
++if [[ "$http_code" != 2* ]]; then
++  echo "OpenAI image request failed: HTTP $http_code" >&2
++  jq -r '.error | "type=\(.type // "unknown") code=\(.code // "unknown") message=\(.message // "no message")"' "$response" >&2 || cat "$response" >&2
++  echo "x-request-id: $(grep -i '^x-request-id:' "$headers" | awk '{print $2}' | tr -d '\r')" >&2
++  exit 1
++fi
++
++count="$(jq '.data | length' "$response")"
++mkdir -p "$(dirname "$out")"
++
++if [[ "$count" -eq 1 && "$n" -eq 1 ]]; then
++  jq -r '.data[0].b64_json' "$response" | base64 --decode > "$out"
++  meta="${out%.*}.json"
++  jq --arg output "$out" --arg request_id "$(grep -i '^x-request-id:' "$headers" | awk '{print $2}' | tr -d '\r')" \
++    '{created, background, output_format, quality, size, usage, output: $output, request_id: $request_id}' \
++    "$response" > "$meta"
++  printf '%s\n' "$out"
++else
++  mkdir -p "$out"
++  for i in $(seq 0 $((count - 1))); do
++    file="$out/image-$((i + 1)).$format"
++    jq -r ".data[$i].b64_json" "$response" | base64 --decode > "$file"
++    printf '%s\n' "$file"
++  done
++  jq --arg output_dir "$out" --arg request_id "$(grep -i '^x-request-id:' "$headers" | awk '{print $2}' | tr -d '\r')" \
++    '{created, background, output_format, quality, size, usage, output_dir: $output_dir, request_id: $request_id}' \
++    "$response" > "$out/metadata.json"
++fi
++```
++
++Example:
++
++```bash
++bin/img-gen.sh \
++  --prompt "A crisp product photo of a matte black mechanical keyboard on a white desk" \
++  --out ./artifacts/img/2026-05-06/run-001/image.png \
++  --size 1024x1024 \
++  --quality medium \
++  --n 1
++```
++
++## 7. **Skill-design implications for `/img`**
++
++Single-agent path:
++
++```bash
++run_id="$(date -u +%Y%m%dT%H%M%SZ)-$(openssl rand -hex 3)"
++out_dir="/home/fao/CXMem/artifacts/img/$run_id"
++mkdir -p "$out_dir"
++
++OPENAI_API_KEY="$OPENAI_API_KEY" CODEX_API_KEY="${CODEX_API_KEY:-$OPENAI_API_KEY}" \
++codex exec \
++  --cd /home/fao/CXMem \
++  --sandbox workspace-write \
++  --ask-for-approval never \
++  --output-last-message "$out_dir/codex-final.md" \
++  "Use bin/img-gen.sh to generate one image for this prompt: $PROMPT. Save it as $out_dir/image.png. Write metadata as $out_dir/metadata.json. Final answer must be JSON with output_path, metadata_path, model, size, quality."
++```
++
++Multi-agent path:
++
++```bash
++for i in 1 2 3 4; do
++  out_dir="/home/fao/CXMem/artifacts/img/$run_id/variant-$i"
++  mkdir -p "$out_dir"
++  (
++    style_hint="$(jq -r ".[$((i-1))]" styles.json)"
++    OPENAI_API_KEY="$OPENAI_API_KEY" CODEX_API_KEY="${CODEX_API_KEY:-$OPENAI_API_KEY}" \
++    codex exec \
++      --cd /home/fao/CXMem \
++      --sandbox workspace-write \
++      --ask-for-approval never \
++      --output-last-message "$out_dir/codex-final.md" \
++      "Generate one image with style hint '$style_hint'. Prompt: $PROMPT. Save image and metadata under $out_dir."
++  ) &
++done
++wait
++```
++
++Suggested output convention:
++
++```text
++artifacts/img/
++  20260506T231500Z-a1b2c3/
++    manifest.json
++    prompt.txt
++    variant-1/
++      image.png
++      metadata.json
++      codex-final.md
++      response.json
++    variant-2/
++      image.png
++      metadata.json
++      codex-final.md
++```
++
++Record metadata beside every image:
++
++```json
++{
++  "prompt_original": "...",
++  "prompt_effective": "...",
++  "model": "gpt-image-2",
++  "size": "1024x1024",
++  "quality": "medium",
++  "n": 1,
++  "output_format": "png",
++  "background": "auto",
++  "moderation": "auto",
++  "created_at": "2026-05-06T23:15:00Z",
++  "request_id": "req_...",
++  "usage": {
++    "input_tokens": 0,
++    "output_tokens": 0,
++    "total_tokens": 0
++  },
++  "estimated_cost_usd": 0.053,
++  "codex": {
++    "version": "0.128.0",
++    "sandbox": "workspace-write",
++    "auth_mode": "CODEX_API_KEY or cached ChatGPT"
++  },
++  "source_files": []
++}
++```
++
++Failure handling:
++
++| Failure | Handling |
++|---|---|
++| Rate limit / 429 | Retry with exponential backoff and jitter; honor `Retry-After` or rate-limit reset headers; cap retries at 3-5. |
++| Transient 5xx / network | Retry with backoff; preserve failed response and request ID. |
++| Content policy refusal | Do not retry unchanged; record refusal and return a prompt-revision request. |
++| Missing `OPENAI_API_KEY` | Fail before dispatching Codex agents. |
++| Codex auth missing | Use `CODEX_API_KEY="$OPENAI_API_KEY"` for exec, or run `printenv OPENAI_API_KEY \| codex login --with-api-key`. |
++| Partial multi-agent failure | Keep successful variants; write a top-level manifest listing failed variants and reasons. |
++
++## 8. **Open questions / risks**
++
++1. `gpt-image-2` supports flexible sizes, but the docs do not expose a complete machine-readable list of valid width/height constraints in the pages consulted. The skill should validate common sizes locally and pass through custom sizes only after empirical testing.
++2. The API reference enum page consulted still omits `gpt-image-2` in one model enum section while the model page, changelog, pricing, and guide confirm it. Treat this as stale reference generation.
++3. Streaming docs and model pages are semantically inconsistent: guides show endpoint/tool partial-image streaming, while model pages say model streaming is not supported. For `/img`, avoid streaming unless user experience requires it.
++4. `n=1..10` is documented for image generation, but parallel single-image requests are often easier to isolate and retry than one `n>1` request. Test account-specific IPM and latency before choosing the default.
++5. `CODEX_API_KEY` is documented as `codex exec`-only. `OPENAI_API_KEY` remains the standard SDK/curl variable. The orchestrator should set both when launching Codex workers.
++6. Codex shell environment filtering can suppress secrets. A downstream skill must test whether `OPENAI_API_KEY` reaches the agent's shell under Hao's actual `~/.codex/config.toml`.
++7. Costs can differ from the table for `gpt-image-2` custom sizes. Use returned `usage` plus pricing tables for post-hoc accounting.
++
++## 9. **Source list**
++
++| URL | What it confirmed |
++|---|---|
++| https://developers.openai.com/api/docs/changelog | `gpt-image-2` released 2026-04-21; `gpt-image-1.5` released 2025-12-16; `gpt-image-1-mini` released 2025-10-06; Batch/API updates. |
++| https://developers.openai.com/api/docs/models/gpt-image-2 | Current `gpt-image-2` model page, snapshot `gpt-image-2-2026-04-21`, endpoints, rate limits, state-of-the-art description. |
++| https://developers.openai.com/api/docs/guides/image-generation | Generation/edit examples, GPT Image parameters, moderation, transparency, latency, flexible sizes, pricing calculator table. |
++| https://developers.openai.com/api/docs/pricing | Token prices for `gpt-image-2`, `gpt-image-1.5`, and `gpt-image-1-mini`; Batch discount. |
++| https://developers.openai.com/api/docs/models/gpt-image-1.5 | `gpt-image-1.5` pricing, snapshot, endpoints, previous-model status. |
++| https://developers.openai.com/api/docs/models/gpt-image-1-mini | `gpt-image-1-mini` cost-efficient status, pricing, endpoints. |
++| https://developers.openai.com/api/docs/models/gpt-image-1 | `gpt-image-1` previous/deprecated status, pricing, endpoints. |
++| https://developers.openai.com/api/reference/resources/images | Image API response fields, b64 vs url behavior, prompt length, n range, edit limits; noted stale enum inconsistency around `gpt-image-2`. |
++| https://openai.com/index/new-chatgpt-images-is-here/ | Public release context for ChatGPT Images / GPT Image 1.5 and product naming. |
++| https://deploymentsafety.openai.com/chatgpt-images-2-0/chatgpt-images-2-0.pdf | Confirms "ChatGPT Images 2.0" product/system-card naming, distinct from the API model ID `gpt-image-2`. |
++| https://developers.openai.com/codex/auth | Codex auth methods, ChatGPT vs API key, local credential cache, headless/device auth, credential storage. |
++| https://developers.openai.com/codex/noninteractive | `codex exec` automation behavior, sandbox guidance, `--json`, `--output-last-message`, and `CODEX_API_KEY` for CI/programmatic runs. |
++| https://developers.openai.com/codex/config-basic | Codex config file precedence and user/project config locations. |
++| https://developers.openai.com/codex/config-advanced | Shell environment policy and sandbox/network configuration details. |
++| https://developers.openai.com/codex/config-reference | MCP configuration and environment variable forwarding details. |
++| https://github.com/openai/codex/blob/main/docs/authentication.md | Official repo points auth docs to developers.openai.com. |
++| https://www.mintlify.com/openai/codex/cli/exec | Unofficial generated CLI reference used only as a secondary cross-check for `codex exec` flags. |
++
+
+codex
+Wrote the report to [codex-image-gen.md](/home/fao/CXMem/notes/research/codex-image-gen.md).
+
+Key verified points included:
+- Latest real API model ID is `gpt-image-2`, not `gpt-image-2.0`.
+- `gpt-image-2` was released April 21, 2026.
+- Codex CLI 0.128.0 does not expose a direct built-in image generation command/MCP in this install.
+- Recommended Codex path is `codex exec` dispatching a helper script or `curl`.
+- `codex exec` auth should use cached Codex login or `CODEX_API_KEY`; image API calls use `OPENAI_API_KEY`.
+
+I did not call the OpenAI API.
+diff --git a/notes/research/codex-image-gen.md b/notes/research/codex-image-gen.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..b6ef42735d8e90e20fdf3185664944177449c14f
+--- /dev/null
++++ b/notes/research/codex-image-gen.md
+@@ -0,0 +1,611 @@
++# Programmatic OpenAI Image Generation from Codex CLI
++
++Research date: 2026-05-06
++
++## 1. **Model landscape (verified 2026-05)**
++
++OpenAI's current API image-generation family is GPT Image. The real latest API model ID is `gpt-image-2`, released April 21, 2026. It is the current state-of-the-art image generation/editing model and supports flexible image sizes, high-fidelity image inputs, token-based image pricing, and Batch API support.
++
++There is no verified API model ID named `gpt-image-2.0`. Hao's "gpt image 2.0" maps to the product/system-card naming "ChatGPT Images 2.0" and to the API model ID `gpt-image-2`, not `gpt-image-2.0`.
++
++Current lineup:
++
++| Model ID | Status | Release / snapshot | What it supersedes | Notes |
++|---|---:|---:|---|---|
++| `gpt-image-2` | Latest | Released 2026-04-21; snapshot `gpt-image-2-2026-04-21` | Supersedes `gpt-image-1.5` for best quality/capability | Fast, high-quality generation and editing; flexible image sizes; high-fidelity inputs. |
++| `gpt-image-1.5` | Previous | Released 2025-12-16; snapshot `gpt-image-1.5-2025-12-16` | Superseded `gpt-image-1` | Stronger prompt adherence than `gpt-image-1`; still supported. |
++| `gpt-image-1-mini` | Cost-efficient | Released 2025-10-06 | Lower-cost alternative to GPT Image 1 family | Cheapest current GPT Image option. |
++| `gpt-image-1` | Deprecated / previous | Original GPT Image API model | Superseded by `gpt-image-1.5`, then `gpt-image-2` | Model page marks it deprecated. |
++| `chatgpt-image-latest` | ChatGPT image alias | Released 2025-12-16 with GPT Image 1.5 | Alias for model used in ChatGPT Images | Useful only if you deliberately want ChatGPT-aligned behavior; docs emphasize API model IDs above. |
++| `dall-e-2`, `dall-e-3` | Deprecated legacy | Deprecation date in docs: support ends 2026-05-12 | Superseded by GPT Image models | `dall-e-2` is still the only variation endpoint model. |
++
++Docs caveat: some older OpenAI image guide/API reference pages and snippets still mention only `gpt-image-1.5`, `gpt-image-1`, and `gpt-image-1-mini`, or say GPT Image 1.5 is latest. The model page, pricing page, and 2026-04-21 changelog confirm `gpt-image-2` is current.
++
++## 2. **Capabilities matrix**
++
++| Capability | `gpt-image-2` | `gpt-image-1.5` | `gpt-image-1-mini` | `gpt-image-1` | DALL-E legacy |
++|---|---|---|---|---|---|
++| Generate endpoint | `/v1/images/generations` | Same | Same | Same | Same |
++| Edit/inpaint endpoint | `/v1/images/edits` | Same | Same | Same | `dall-e-2` edits; `dall-e-3` generations only |
++| Variation endpoint | No | No | No | No | `dall-e-2` only |
++| Response format | GPT Image models return `b64_json` by default; `url` unsupported | Same | Same | Same | `url` default; `b64_json` optional |
++| Output formats | `png`, `jpeg`, `webp` | Same | Same | Same | Legacy behavior differs; use GPT Image unless variation required |
++| Transparency / alpha | `background=transparent`, only with `png` or `webp` | Same | Same | Same | Not a GPT Image-style feature |
++| Prompt max length | 32,000 chars for GPT Image models | Same | Same | Same | `dall-e-2`: 1,000; `dall-e-3`: 4,000 |
++| Images per generation request | `n` 1-10 per API reference; verify current SDK behavior for `gpt-image-2` | Same documented range | Same documented range | Same documented range | `dall-e-3`: only `n=1` |
++| Edit input limits | Up to 16 images; each GPT Image input `png`, `webp`, or `jpg`, <50 MB | Same | Same | Same | `dall-e-2`: one square PNG <4 MB |
++| Input fidelity | Always high; `input_fidelity` cannot be changed | Supports fidelity control; docs note first 5 input images get higher preservation | Supports high fidelity; first image best preserved | Supports high fidelity; first image best preserved | Legacy |
++| Sizes | Flexible sizes; thousands of valid resolutions; examples include `1024x1024`, `1024x1536`, `1536x1024` | `1024x1024`, `1024x1536`, `1536x1024`, `auto` | Same | Same | Legacy sizes differ |
++| Quality tiers | `low`, `medium`, `high`, `auto` | Same | Same | Same | Legacy-specific |
++| Streaming partial images | Image API and Responses API support partial images; model pages say model "Streaming: Not supported", so treat streaming as endpoint/tool streaming, not model feature | Same caveat | Same caveat | Same caveat | Not primary path |
++| Content policy | Prompts and generated images filtered; `moderation=auto` or `low` for GPT Image models | Same | Same | Same | Filtered |
++| Latency | Docs: complex prompts may take up to 2 minutes | Same | Same | Same | Varies |
++
++Pricing shown below is output image cost for common sizes, excluding input text tokens and edit input image tokens. GPT Image models bill by tokens; total cost is input text + input images if editing + image output tokens.
++
++| Model | Quality | 1024x1024 | 1024x1536 | 1536x1024 |
++|---|---:|---:|---:|---:|
++| `gpt-image-2` | low | $0.006 | $0.005 | $0.005 |
++| `gpt-image-2` | medium | $0.053 | $0.041 | $0.041 |
++| `gpt-image-2` | high | $0.211 | $0.165 | $0.165 |
++| `gpt-image-1.5` | low | $0.009 | $0.013 | $0.013 |
++| `gpt-image-1.5` | medium | $0.034 | $0.050 | $0.050 |
++| `gpt-image-1.5` | high | $0.133 | $0.200 | $0.200 |
++| `gpt-image-1` | low | $0.011 | $0.016 | $0.016 |
++| `gpt-image-1` | medium | $0.042 | $0.063 | $0.063 |
++| `gpt-image-1` | high | $0.167 | $0.250 | $0.250 |
++| `gpt-image-1-mini` | low | $0.005 | $0.006 | $0.006 |
++| `gpt-image-1-mini` | medium | $0.011 | $0.015 | $0.015 |
++| `gpt-image-1-mini` | high | $0.036 | $0.052 | $0.052 |
++
++Token prices per 1M tokens:
++
++| Model | Text input | Text cached input | Text output | Image input | Image cached input | Image output |
++|---|---:|---:|---:|---:|---:|---:|
++| `gpt-image-2` | $5.00 | $1.25 | n/a | $8.00 | $2.00 | $30.00 |
++| `gpt-image-1.5` | $5.00 | $1.25 | $10.00 | $8.00 | $2.00 | $32.00 |
++| `gpt-image-1-mini` | $2.00 | $0.20 | n/a | $2.50 | $0.25 | $8.00 |
++| `gpt-image-1` | $5.00 | $1.25 | n/a | $10.00 | $2.50 | $40.00 |
++
++## 3. **API invocation — raw HTTP**
++
++Minimal generation request, returning base64 image data and saving it locally:
++
++```bash
++prompt='A crisp product photo of a matte black mechanical keyboard on a white desk'
++
++jq -n \
++  --arg model "gpt-image-2" \
++  --arg prompt "$prompt" \
++  '{
++    model: $model,
++    prompt: $prompt,
++    size: "1024x1024",
++    quality: "medium",
++    output_format: "png"
++  }' \
++| curl -sS -D /tmp/openai-img.headers \
++    -X POST "https://api.openai.com/v1/images/generations" \
++    -H "Authorization: Bearer $OPENAI_API_KEY" \
++    -H "Content-Type: application/json" \
++    --data-binary @- \
++| tee /tmp/openai-img.response.json \
++| jq -r '.data[0].b64_json' \
++| base64 --decode > ./image.png
++```
++
++Request JSON shape:
++
++```json
++{
++  "model": "gpt-image-2",
++  "prompt": "A crisp product photo of a matte black mechanical keyboard on a white desk",
++  "size": "1024x1024",
++  "quality": "medium",
++  "n": 1,
++  "output_format": "png",
++  "background": "opaque",
++  "moderation": "auto"
++}
++```
++
++For GPT Image models, expect `data[0].b64_json`; `data[0].url` is unsupported. For DALL-E legacy models, `url` may be returned. A defensive decoder:
++
++```bash
++if jq -e '.data[0].b64_json' response.json >/dev/null; then
++  jq -r '.data[0].b64_json' response.json | base64 --decode > image.png
++elif jq -e '.data[0].url' response.json >/dev/null; then
++  curl -L "$(jq -r '.data[0].url' response.json)" -o image.png
++else
++  jq . response.json >&2
++  exit 1
++fi
++```
++
++Transparent PNG:
++
++```json
++{
++  "model": "gpt-image-2",
++  "prompt": "A flat icon of a fountain pen, transparent background",
++  "size": "1024x1024",
++  "quality": "high",
++  "output_format": "png",
++  "background": "transparent"
++}
++```
++
++Common error modes:
++
++```json
++{
++  "error": {
++    "message": "Rate limit reached for images per minute.",
++    "type": "rate_limit_error",
++    "param": null,
++    "code": "rate_limit_exceeded"
++  }
++}
++```
++
++Handle with exponential backoff using `Retry-After`, `x-ratelimit-reset-requests`, or a bounded sleep. Avoid fan-out above the account's IPM limit.
++
++```json
++{
++  "error": {
++    "message": "Your request was rejected as a result of our safety system.",
++    "type": "invalid_request_error",
++    "param": "prompt",
++    "code": "content_policy_violation"
++  }
++}
++```
++
++Handle by recording the refusal, returning a clear message to the user, and optionally asking for a revised prompt. Do not blindly retry unchanged prompts after content-policy refusals.
++
++## 4. **API invocation — OpenAI Python/Node SDKs**
++
++Python one-shot:
++
++```python
++#!/usr/bin/env python3
++import base64
++from openai import OpenAI
++
++client = OpenAI()  # reads OPENAI_API_KEY
++
++result = client.images.generate(
++    model="gpt-image-2",
++    prompt="A crisp product photo of a matte black mechanical keyboard on a white desk",
++    size="1024x1024",
++    quality="medium",
++    output_format="png",
++    n=1,
++)
++
++with open("image.png", "wb") as f:
++    f.write(base64.b64decode(result.data[0].b64_json))
++```
++
++Node one-shot:
++
++```javascript
++#!/usr/bin/env node
++import fs from "node:fs";
++import OpenAI from "openai";
++
++const client = new OpenAI(); // reads OPENAI_API_KEY
++
++const result = await client.images.generate({
++  model: "gpt-image-2",
++  prompt: "A crisp product photo of a matte black mechanical keyboard on a white desk",
++  size: "1024x1024",
++  quality: "medium",
++  output_format: "png",
++  n: 1,
++});
++
++fs.writeFileSync("image.png", Buffer.from(result.data[0].b64_json, "base64"));
++```
++
++Responses API path, useful for multi-turn prompting but less direct for `/img`:
++
++```python
++import base64
++from openai import OpenAI
++
++client = OpenAI()
++response = client.responses.create(
++    model="gpt-5.5",
++    input="Generate an image of a matte black mechanical keyboard on a white desk",
++    tools=[{"type": "image_generation", "quality": "medium"}],
++    tool_choice={"type": "image_generation"},
++)
++
++images = [o.result for o in response.output if o.type == "image_generation_call"]
++with open("image.png", "wb") as f:
++    f.write(base64.b64decode(images[0]))
++```
++
++For a simple `/img <prompt>` skill, prefer the Images API. It is simpler, exposes image-specific parameters directly, and avoids an extra mainline model step.
++
++## 5. **Codex CLI integration paths**
++
++### Built-in image generation in Codex CLI 0.128.0
++
++I found no `codex` subcommand that directly generates images, and `codex mcp list` reports no configured MCP servers on this machine. `codex exec --help` exposes image inputs via `--image`, but not an image-output generation command.
++
++OpenAI's API docs describe an `image_generation` hosted tool in the Responses API. That is an API tool, not a `codex exec` command-line image generator. In Codex CLI 0.128.0, the practical path is to let the Codex agent run `curl` or a helper script that calls `/v1/images/generations`.
++
++### Recommended pattern
++
++| Pattern | Recommendation | Why |
++|---|---|---|
++| `curl` directly inside `codex exec` | Good for minimal proof-of-concept | No dependencies except `curl`, `jq`, `base64`; more shell quoting risk. |
++| Python helper invoked by Codex | Best default | Cleaner error handling, metadata capture, retries, path handling; SDK reads `OPENAI_API_KEY`. |
++| Node helper invoked by Codex | Good if downstream skill is JS-heavy | Same benefits as Python, but more npm dependency surface. |
++| Responses API image tool inside Codex | Use only for conversational/multi-turn image workflows | More moving parts and cost; not needed for one-shot `/img`. |
++| Codex built-in/MCP image tool | Not available by default in this verified CLI install | Could be added later via MCP/plugin, but do not assume it. |
++
++### `codex exec` invocation from an orchestrator
++
++Use a writable output directory and network access. In current local help, available sandbox modes are `read-only`, `workspace-write`, and `danger-full-access`; official docs also describe explicit sandbox selection for automation.
++
++Conservative version if output stays under the workspace and network is allowed by the environment/config:
++
++```bash
++mkdir -p ./artifacts/img/2026-05-06/run-001
++
++CODEX_API_KEY="${CODEX_API_KEY:-$OPENAI_API_KEY}" \
++codex exec \
++  --cd /home/fao/CXMem \
++  --sandbox workspace-write \
++  --ask-for-approval never \
++  --output-last-message ./artifacts/img/2026-05-06/run-001/codex-final.md \
++  'Generate one image using ./bin/img-gen.sh or curl. Prompt: "A crisp product photo of a matte black mechanical keyboard on a white desk". Save output under ./artifacts/img/2026-05-06/run-001 and report file paths only.'
++```
++
++If the parent process is already externally sandboxed and you need guaranteed network/filesystem access:
++
++```bash
++CODEX_API_KEY="${CODEX_API_KEY:-$OPENAI_API_KEY}" \
++codex exec \
++  --cd /home/fao/CXMem \
++  --sandbox danger-full-access \
++  --ask-for-approval never \
++  --output-last-message ./artifacts/img/2026-05-06/run-001/codex-final.md \
++  'Generate one image ...'
++```
++
++For machine-readable orchestration, add `--json` and parse JSONL events, or use `--output-schema` for a strict final result. `--output-last-message` writes the final message to a file and still prints it to stdout.
++
++### Auth behavior
++
++There are two separate auth concerns:
++
++1. The helper script/curl that calls the Images API should use `OPENAI_API_KEY` in the standard API way:
++
++```bash
++Authorization: Bearer $OPENAI_API_KEY
++```
++
++2. `codex exec` itself uses Codex CLI auth. Official Codex docs say `codex exec` reuses saved CLI authentication by default, and for CI/programmatic one-shot runs `CODEX_API_KEY` is supported only in `codex exec`:
++
++```bash
++CODEX_API_KEY="$OPENAI_API_KEY" codex exec --json "triage open bug reports"
++```
++
++Local verification on this machine:
++
++```text
++$ codex --version
++codex-cli 0.128.0
++
++$ codex login status
++Logged in using ChatGPT
++
++$ codex login --help
++--with-api-key  Read the API key from stdin
++```
++
++So, do not assume `codex exec` itself reads `OPENAI_API_KEY` directly. Use one of these:
++
++```bash
++# One-shot API-key auth for the Codex agent:
++CODEX_API_KEY="$OPENAI_API_KEY" codex exec ...
++
++# Or cache API-key auth in Codex:
++printenv OPENAI_API_KEY | codex login --with-api-key
++codex exec ...
++
++# Or use existing ChatGPT login:
++codex login
++codex exec ...
++```
++
++Inside the agent-run shell, ensure `OPENAI_API_KEY` reaches subprocesses. Codex has a `shell_environment_policy`; secrets may be filtered unless explicitly passed or configured. For image generation, the cleanest pattern is to have the parent invoke:
++
++```bash
++OPENAI_API_KEY="$OPENAI_API_KEY" CODEX_API_KEY="$OPENAI_API_KEY" codex exec ...
++```
++
++If a restrictive Codex config blocks secret inheritance, add a scoped config override only for this run:
++
++```bash
++codex exec \
++  -c 'shell_environment_policy.inherit="all"' \
++  ...
++```
++
++Use that carefully because it can expose more env vars to the agent's shell commands.
++
++## 6. **Reference helper script**
++
++Copy-paste as `bin/img-gen.sh`. This uses only `bash`, `curl`, `jq`, and `base64`; it does not require the Python or Node SDK.
++
++```bash
++#!/usr/bin/env bash
++set -euo pipefail
++
++model="gpt-image-2"
++size="1024x1024"
++quality="medium"
++n="1"
++format="png"
++background="auto"
++moderation="auto"
++prompt=""
++out=""
++
++usage() {
++  cat >&2 <<'USAGE'
++Usage:
++  img-gen.sh --prompt PROMPT --out OUT [--size SIZE] [--quality low|medium|high|auto] [--n N]
++
++Options:
++  --prompt       Text prompt. Required.
++  --out          Output file for n=1, or output directory/prefix for n>1. Required.
++  --size         Default: 1024x1024. For gpt-image-2, additional valid sizes exist.
++  --quality      Default: medium.
++  --n            Default: 1. Documented range: 1-10.
++  --model        Default: gpt-image-2.
++  --format       png|jpeg|webp. Default: png.
++  --background   auto|opaque|transparent. Default: auto.
++  --moderation   auto|low. Default: auto.
++USAGE
++}
++
++while [[ $# -gt 0 ]]; do
++  case "$1" in
++    --prompt) prompt="${2:-}"; shift 2 ;;
++    --out) out="${2:-}"; shift 2 ;;
++    --size) size="${2:-}"; shift 2 ;;
++    --quality) quality="${2:-}"; shift 2 ;;
++    --n) n="${2:-}"; shift 2 ;;
++    --model) model="${2:-}"; shift 2 ;;
++    --format) format="${2:-}"; shift 2 ;;
++    --background) background="${2:-}"; shift 2 ;;
++    --moderation) moderation="${2:-}"; shift 2 ;;
++    -h|--help) usage; exit 0 ;;
++    *) echo "Unknown argument: $1" >&2; usage; exit 2 ;;
++  esac
++done
++
++if [[ -z "$prompt" || -z "$out" ]]; then
++  usage
++  exit 2
++fi
++
++if [[ -z "${OPENAI_API_KEY:-}" ]]; then
++  echo "OPENAI_API_KEY is not set" >&2
++  exit 2
++fi
++
++tmpdir="$(mktemp -d)"
++trap 'rm -rf "$tmpdir"' EXIT
++
++request="$tmpdir/request.json"
++response="$tmpdir/response.json"
++headers="$tmpdir/headers.txt"
++
++jq -n \
++  --arg model "$model" \
++  --arg prompt "$prompt" \
++  --arg size "$size" \
++  --arg quality "$quality" \
++  --arg format "$format" \
++  --arg background "$background" \
++  --arg moderation "$moderation" \
++  --argjson n "$n" \
++  '{
++    model: $model,
++    prompt: $prompt,
++    size: $size,
++    quality: $quality,
++    n: $n,
++    output_format: $format,
++    background: $background,
++    moderation: $moderation
++  }' > "$request"
++
++http_code="$(
++  curl -sS \
++    -w '%{http_code}' \
++    -D "$headers" \
++    -o "$response" \
++    -X POST "https://api.openai.com/v1/images/generations" \
++    -H "Authorization: Bearer $OPENAI_API_KEY" \
++    -H "Content-Type: application/json" \
++    --data-binary @"$request"
++)"
++
++if [[ "$http_code" != 2* ]]; then
++  echo "OpenAI image request failed: HTTP $http_code" >&2
++  jq -r '.error | "type=\(.type // "unknown") code=\(.code // "unknown") message=\(.message // "no message")"' "$response" >&2 || cat "$response" >&2
++  echo "x-request-id: $(grep -i '^x-request-id:' "$headers" | awk '{print $2}' | tr -d '\r')" >&2
++  exit 1
++fi
++
++count="$(jq '.data | length' "$response")"
++mkdir -p "$(dirname "$out")"
++
++if [[ "$count" -eq 1 && "$n" -eq 1 ]]; then
++  jq -r '.data[0].b64_json' "$response" | base64 --decode > "$out"
++  meta="${out%.*}.json"
++  jq --arg output "$out" --arg request_id "$(grep -i '^x-request-id:' "$headers" | awk '{print $2}' | tr -d '\r')" \
++    '{created, background, output_format, quality, size, usage, output: $output, request_id: $request_id}' \
++    "$response" > "$meta"
++  printf '%s\n' "$out"
++else
++  mkdir -p "$out"
++  for i in $(seq 0 $((count - 1))); do
++    file="$out/image-$((i + 1)).$format"
++    jq -r ".data[$i].b64_json" "$response" | base64 --decode > "$file"
++    printf '%s\n' "$file"
++  done
++  jq --arg output_dir "$out" --arg request_id "$(grep -i '^x-request-id:' "$headers" | awk '{print $2}' | tr -d '\r')" \
++    '{created, background, output_format, quality, size, usage, output_dir: $output_dir, request_id: $request_id}' \
++    "$response" > "$out/metadata.json"
++fi
++```
++
++Example:
++
++```bash
++bin/img-gen.sh \
++  --prompt "A crisp product photo of a matte black mechanical keyboard on a white desk" \
++  --out ./artifacts/img/2026-05-06/run-001/image.png \
++  --size 1024x1024 \
++  --quality medium \
++  --n 1
++```
++
++## 7. **Skill-design implications for `/img`**
++
++Single-agent path:
++
++```bash
++run_id="$(date -u +%Y%m%dT%H%M%SZ)-$(openssl rand -hex 3)"
++out_dir="/home/fao/CXMem/artifacts/img/$run_id"
++mkdir -p "$out_dir"
++
++OPENAI_API_KEY="$OPENAI_API_KEY" CODEX_API_KEY="${CODEX_API_KEY:-$OPENAI_API_KEY}" \
++codex exec \
++  --cd /home/fao/CXMem \
++  --sandbox workspace-write \
++  --ask-for-approval never \
++  --output-last-message "$out_dir/codex-final.md" \
++  "Use bin/img-gen.sh to generate one image for this prompt: $PROMPT. Save it as $out_dir/image.png. Write metadata as $out_dir/metadata.json. Final answer must be JSON with output_path, metadata_path, model, size, quality."
++```
++
++Multi-agent path:
++
++```bash
++for i in 1 2 3 4; do
++  out_dir="/home/fao/CXMem/artifacts/img/$run_id/variant-$i"
++  mkdir -p "$out_dir"
++  (
++    style_hint="$(jq -r ".[$((i-1))]" styles.json)"
++    OPENAI_API_KEY="$OPENAI_API_KEY" CODEX_API_KEY="${CODEX_API_KEY:-$OPENAI_API_KEY}" \
++    codex exec \
++      --cd /home/fao/CXMem \
++      --sandbox workspace-write \
++      --ask-for-approval never \
++      --output-last-message "$out_dir/codex-final.md" \
++      "Generate one image with style hint '$style_hint'. Prompt: $PROMPT. Save image and metadata under $out_dir."
++  ) &
++done
++wait
++```
++
++Suggested output convention:
++
++```text
++artifacts/img/
++  20260506T231500Z-a1b2c3/
++    manifest.json
++    prompt.txt
++    variant-1/
++      image.png
++      metadata.json
++      codex-final.md
++      response.json
++    variant-2/
++      image.png
++      metadata.json
++      codex-final.md
++```
++
++Record metadata beside every image:
++
++```json
++{
++  "prompt_original": "...",
++  "prompt_effective": "...",
++  "model": "gpt-image-2",
++  "size": "1024x1024",
++  "quality": "medium",
++  "n": 1,
++  "output_format": "png",
++  "background": "auto",
++  "moderation": "auto",
++  "created_at": "2026-05-06T23:15:00Z",
++  "request_id": "req_...",
++  "usage": {
++    "input_tokens": 0,
++    "output_tokens": 0,
++    "total_tokens": 0
++  },
++  "estimated_cost_usd": 0.053,
++  "codex": {
++    "version": "0.128.0",
++    "sandbox": "workspace-write",
++    "auth_mode": "CODEX_API_KEY or cached ChatGPT"
++  },
++  "source_files": []
++}
++```
++
++Failure handling:
++
++| Failure | Handling |
++|---|---|
++| Rate limit / 429 | Retry with exponential backoff and jitter; honor `Retry-After` or rate-limit reset headers; cap retries at 3-5. |
++| Transient 5xx / network | Retry with backoff; preserve failed response and request ID. |
++| Content policy refusal | Do not retry unchanged; record refusal and return a prompt-revision request. |
++| Missing `OPENAI_API_KEY` | Fail before dispatching Codex agents. |
++| Codex auth missing | Use `CODEX_API_KEY="$OPENAI_API_KEY"` for exec, or run `printenv OPENAI_API_KEY \| codex login --with-api-key`. |
++| Partial multi-agent failure | Keep successful variants; write a top-level manifest listing failed variants and reasons. |
++
++## 8. **Open questions / risks**
++
++1. `gpt-image-2` supports flexible sizes, but the docs do not expose a complete machine-readable list of valid width/height constraints in the pages consulted. The skill should validate common sizes locally and pass through custom sizes only after empirical testing.
++2. The API reference enum page consulted still omits `gpt-image-2` in one model enum section while the model page, changelog, pricing, and guide confirm it. Treat this as stale reference generation.
++3. Streaming docs and model pages are semantically inconsistent: guides show endpoint/tool partial-image streaming, while model pages say model streaming is not supported. For `/img`, avoid streaming unless user experience requires it.
++4. `n=1..10` is documented for image generation, but parallel single-image requests are often easier to isolate and retry than one `n>1` request. Test account-specific IPM and latency before choosing the default.
++5. `CODEX_API_KEY` is documented as `codex exec`-only. `OPENAI_API_KEY` remains the standard SDK/curl variable. The orchestrator should set both when launching Codex workers.
++6. Codex shell environment filtering can suppress secrets. A downstream skill must test whether `OPENAI_API_KEY` reaches the agent's shell under Hao's actual `~/.codex/config.toml`.
++7. Costs can differ from the table for `gpt-image-2` custom sizes. Use returned `usage` plus pricing tables for post-hoc accounting.
++
++## 9. **Source list**
++
++| URL | What it confirmed |
++|---|---|
++| https://developers.openai.com/api/docs/changelog | `gpt-image-2` released 2026-04-21; `gpt-image-1.5` released 2025-12-16; `gpt-image-1-mini` released 2025-10-06; Batch/API updates. |
++| https://developers.openai.com/api/docs/models/gpt-image-2 | Current `gpt-image-2` model page, snapshot `gpt-image-2-2026-04-21`, endpoints, rate limits, state-of-the-art description. |
++| https://developers.openai.com/api/docs/guides/image-generation | Generation/edit examples, GPT Image parameters, moderation, transparency, latency, flexible sizes, pricing calculator table. |
++| https://developers.openai.com/api/docs/pricing | Token prices for `gpt-image-2`, `gpt-image-1.5`, and `gpt-image-1-mini`; Batch discount. |
++| https://developers.openai.com/api/docs/models/gpt-image-1.5 | `gpt-image-1.5` pricing, snapshot, endpoints, previous-model status. |
++| https://developers.openai.com/api/docs/models/gpt-image-1-mini | `gpt-image-1-mini` cost-efficient status, pricing, endpoints. |
++| https://developers.openai.com/api/docs/models/gpt-image-1 | `gpt-image-1` previous/deprecated status, pricing, endpoints. |
++| https://developers.openai.com/api/reference/resources/images | Image API response fields, b64 vs url behavior, prompt length, n range, edit limits; noted stale enum inconsistency around `gpt-image-2`. |
++| https://openai.com/index/new-chatgpt-images-is-here/ | Public release context for ChatGPT Images / GPT Image 1.5 and product naming. |
++| https://deploymentsafety.openai.com/chatgpt-images-2-0/chatgpt-images-2-0.pdf | Confirms "ChatGPT Images 2.0" product/system-card naming, distinct from the API model ID `gpt-image-2`. |
++| https://developers.openai.com/codex/auth | Codex auth methods, ChatGPT vs API key, local credential cache, headless/device auth, credential storage. |
++| https://developers.openai.com/codex/noninteractive | `codex exec` automation behavior, sandbox guidance, `--json`, `--output-last-message`, and `CODEX_API_KEY` for CI/programmatic runs. |
++| https://developers.openai.com/codex/config-basic | Codex config file precedence and user/project config locations. |
++| https://developers.openai.com/codex/config-advanced | Shell environment policy and sandbox/network configuration details. |
++| https://developers.openai.com/codex/config-reference | MCP configuration and environment variable forwarding details. |
++| https://github.com/openai/codex/blob/main/docs/authentication.md | Official repo points auth docs to developers.openai.com. |
++| https://www.mintlify.com/openai/codex/cli/exec | Unofficial generated CLI reference used only as a secondary cross-check for `codex exec` flags. |
++
+
+tokens used
+306,229
+Wrote the report to [codex-image-gen.md](/home/fao/CXMem/notes/research/codex-image-gen.md).
+
+Key verified points included:
+- Latest real API model ID is `gpt-image-2`, not `gpt-image-2.0`.
+- `gpt-image-2` was released April 21, 2026.
+- Codex CLI 0.128.0 does not expose a direct built-in image generation command/MCP in this install.
+- Recommended Codex path is `codex exec` dispatching a helper script or `curl`.
+- `codex exec` auth should use cached Codex login or `CODEX_API_KEY`; image API calls use `OPENAI_API_KEY`.
+
+I did not call the OpenAI API.
